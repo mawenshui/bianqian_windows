@@ -1,0 +1,81 @@
+/* Theme Name: 日落橙色 */
+
+StickyNote {
+    background-color: #FFDDCC;
+    color: #000000;
+}
+
+QLineEdit {
+    background-color: #FFDDCC;
+    border: 2px solid #FF9933;
+    border-radius: 5px;
+    /* 移除固定的字体大小，保留字体族和粗体 */
+    /* font: bold 14pt "微软雅黑"; */
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #000000;
+}
+
+QTextEdit {
+    background-color: #FFDDCC;
+    border: 2px solid #FF9933;
+    border-radius: 5px;
+    padding: 5px;
+    /* 移除固定的字体大小，保留字体族 */
+    /* font: 12pt "微软雅黑"; */
+    font-family: "微软雅黑";
+    color: #000000;
+}
+
+QPushButton {
+    background-color: #FF9933;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 5px;
+    /* 移除固定的字体大小，保留字体族 */
+    /* font: 10pt "微软雅黑"; */
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #FFB266; /* 调整亮度 */
+}
+
+QSlider::handle:horizontal {
+    background-color: #FF9933;
+    border: 1px solid #994C00;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    /* 移除固定的字体大小，保留字体族 */
+    /* font: 10pt "微软雅黑"; */
+    font-family: "微软雅黑";
+    color: #000000;
+}
+
+QDialog {
+    background-color: #FFDDCC;
+    color: #000000;
+}
+
+QComboBox {
+    background-color: #FFDDCC;
+    border: 1px solid #FF9933;
+    border-radius: 5px;
+    padding: 5px;
+    color: #000000;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #FF9933;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png); /* 可选：自定义下拉箭头图标 */
+}
