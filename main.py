@@ -7,21 +7,34 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QTextEdit, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QMessageBox, QMenu, QAction,
     QCheckBox, QSystemTrayIcon, QDialog, QFormLayout,
-    QLineEdit, QStyle, QColorDialog, QComboBox
+    QLineEdit, QStyle, QColorDialog, QComboBox, QFrame
 )
-from PyQt5.QtCore import Qt, QCoreApplication, QPoint, QRect, QMimeData  
-from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QPen, QCursor, QGuiApplication
+from PyQt5.QtCore import Qt, QCoreApplication, QPoint, QRect, QMimeData, QTimer, pyqtSignal, QSize
+from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QPen, QCursor, QGuiApplication, QKeySequence
+
+# 导入新功能模块
+from features.search import SearchManager
+from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit
+from features.shortcuts import ShortcutManager
+from features.backup import BackupManager
+from features.positioning import get_position_manager
 
 # 定义常量用于窗口调整大小
 RESIZE_MARGIN = 10  # 调整大小检测边界宽度
 
-class PlainLineEdit(QLineEdit):
+class PlainLineEdit(UndoRedoLineEdit):
     def paste(self):
         clipboard = QApplication.clipboard()
         plain_text = clipboard.text()
         self.insert(plain_text)
 
-class PlainTextEdit(QTextEdit):
+    def insertFromMimeData(self, source: QMimeData):
+        if source.hasText():
+            self.insert(source.text())
+        else:
+            super().insertFromMimeData(source)
+
+class PlainTextEdit(UndoRedoTextEdit):
     def paste(self):
         clipboard = QApplication.clipboard()
         plain_text = clipboard.text()
@@ -166,20 +179,25 @@ class StickyNote(QWidget):
                 saved_geometry.get('width', 400),  # 增加默认宽度
                 saved_geometry.get('height', 300)
             ))
+            # 注册窗口位置
+            position_manager = get_position_manager()
+            position_manager.register_window_position(
+                self.note_id, 
+                QPoint(saved_geometry.get('x', 100), saved_geometry.get('y', 100)), 
+                QSize(saved_geometry.get('width', 400), saved_geometry.get('height', 300))
+            )
         else:
+            # 使用智能定位
+            position_manager = get_position_manager()
+            smart_position = position_manager.get_smart_position(self.note_id)
             self.resize(400, 300)  # 默认大小宽度调整为400
-
-            # **修改部分开始：将新便签置于屏幕中心**
-            screen = QGuiApplication.primaryScreen()
-            if screen:
-                screen_geometry = screen.availableGeometry()
-                x = (screen_geometry.width() - self.width()) // 2
-                y = (screen_geometry.height() - self.height()) // 2
-                self.move(screen_geometry.x() + x, screen_geometry.y() + y)
-            else:
-                # 如果无法获取屏幕几何信息，则默认放置
-                self.move(100, 100)
-            # **修改部分结束**
+            self.move(smart_position)
+            # 注册窗口位置
+            position_manager.register_window_position(
+                self.note_id, 
+                smart_position, 
+                QSize(400, 300)
+            )
 
     def set_font_size(self, title_size, content_size):
         title_font = QFont()
@@ -529,6 +547,13 @@ class StickyNote(QWidget):
     # **修改部分开始：重写 closeEvent 方法，使其在非删除情况下隐藏窗口**
     def closeEvent(self, event):
         if self.is_deleted:
+            # 注销窗口位置
+            position_manager = get_position_manager()
+            position_manager.unregister_window_position(
+                self.note_id, 
+                QPoint(self.x(), self.y()), 
+                QSize(self.width(), self.height())
+            )
             super().closeEvent(event)
         else:
             event.ignore()
@@ -632,6 +657,15 @@ class StickyNoteManager:
         self.settings_file = os.path.abspath(self.settings_file)  # 转换为绝对路径
         self.settings = self.load_settings()
 
+        # 初始化新功能模块
+        self.search_manager = SearchManager(self)
+        self.shortcut_manager = ShortcutManager()
+        self.backup_manager = BackupManager(self)
+        self.position_manager = get_position_manager()
+        
+        # 注册全局快捷键
+        self.setup_global_shortcuts()
+
         # 设置托盘图标和菜单
         self.setup_tray_icon()
 
@@ -645,6 +679,66 @@ class StickyNoteManager:
         # 初始化设置对话框实例为空
         self.settings_dialog = None
 
+    def setup_global_shortcuts(self):
+        """
+        设置全局快捷键
+        """
+        try:
+            # 注册创建新便签的快捷键 (Ctrl+Shift+N)
+            self.shortcut_manager.register_global_shortcut(
+                'Ctrl+Shift+N', 
+                'add_note'
+            )
+            
+            # 注册搜索便签的快捷键 (Ctrl+Shift+F)
+            self.shortcut_manager.register_global_shortcut(
+                'Ctrl+Shift+F', 
+                'show_search_dialog'
+            )
+            
+            # 注册备份管理的快捷键 (Ctrl+Shift+B)
+            self.shortcut_manager.register_global_shortcut(
+                'Ctrl+Shift+B', 
+                'show_backup_dialog'
+            )
+            
+            # 连接快捷键信号到对应方法
+            self.shortcut_manager.shortcut_activated.connect(self.handle_shortcut_activated)
+            
+        except Exception as e:
+            print(f"设置全局快捷键时出错: {e}")
+    
+    def show_search_dialog(self):
+        """
+        显示搜索对话框
+        """
+        self.search_manager.show_search_dialog()
+    
+    def show_backup_dialog(self):
+        """
+        显示备份管理对话框
+        """
+        self.backup_manager.show_backup_dialog()
+    
+    def handle_shortcut_activated(self, action_name):
+        """
+        处理快捷键激活事件
+        
+        Args:
+            action_name: 动作名称
+        """
+        try:
+            if action_name == 'add_note':
+                self.add_note()
+            elif action_name == 'show_search_dialog':
+                self.show_search_dialog()
+            elif action_name == 'show_backup_dialog':
+                self.show_backup_dialog()
+            else:
+                print(f"未知的快捷键动作: {action_name}")
+        except Exception as e:
+            print(f"处理快捷键激活时出错: {e}")
+
     def setup_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self.icon, parent=self.app)
         self.tray_icon.setToolTip("桌面便签应用")
@@ -652,9 +746,19 @@ class StickyNoteManager:
         self.tray_menu = QMenu()
 
         # 添加便签
-        add_action = QAction("添加便签", self.app)
+        add_action = QAction("添加便签 (Ctrl+Shift+N)", self.app)
         add_action.triggered.connect(self.add_note)
         self.tray_menu.addAction(add_action)
+
+        # 添加搜索选项
+        search_action = QAction("搜索便签 (Ctrl+Shift+F)", self.app)
+        search_action.triggered.connect(self.show_search_dialog)
+        self.tray_menu.addAction(search_action)
+
+        # 添加备份管理选项
+        backup_action = QAction("备份管理 (Ctrl+Shift+B)", self.app)
+        backup_action.triggered.connect(self.show_backup_dialog)
+        self.tray_menu.addAction(backup_action)
 
         # 分割线
         self.tray_menu.addSeparator()
@@ -836,6 +940,12 @@ class StickyNoteManager:
                 self.autostart_action.setChecked(True)
 
     def exit_application(self):
+        # 清理快捷键
+        try:
+            self.shortcut_manager.cleanup()
+        except Exception as e:
+            print(f"清理快捷键时出错: {e}")
+        
         for note in list(self.notes.values()):
             note.close()
         self.tray_icon.hide()

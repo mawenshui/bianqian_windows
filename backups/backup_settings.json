@@ -1,0 +1,5 @@
+{
+    "auto_backup_enabled": true,
+    "auto_backup_interval": 3600,
+    "max_backup_count": 10
+}
