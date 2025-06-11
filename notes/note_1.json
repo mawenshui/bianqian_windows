@@ -1,0 +1,23 @@
+{
+    "title": "文字测试",
+    "content": "Version 1.1.0\n华文彩云\n123465\n~！@#￥%……&*（）——+-=",
+    "opacity": 1.0,
+    "always_on_top": true,
+    "geometry": {
+        "x": 1728,
+        "y": 322,
+        "width": 620,
+        "height": 564
+    },
+    "theme": "fresh_blue.css",
+    "title_font_size": 16,
+    "content_font_size": 16,
+    "auto_format_enabled": true,
+    "font_settings": {
+        "family": "方正舒体",
+        "size": 25,
+        "bold": true,
+        "italic": true
+    },
+    "font_color": "#ffffff"
+}

@@ -1,4 +1,10 @@
 {
-    "default_theme": "vibrant_purple.css",
-    "default_font_size": 6
+    "default_theme": "fresh_blue.css",
+    "default_font_size": 6,
+    "font": {
+        "family": "方正舒体",
+        "size": 24,
+        "bold": true,
+        "italic": true
+    }
 }
