@@ -1,23 +1,24 @@
 {
     "title": "文字测试",
-    "content": "Version 1.1.0\n华文彩云\n123465\n~！@#￥%……&*（）——+-=",
+    "content": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'微软雅黑'; font-size:18pt; font-weight:600; font-style:italic;\">\n<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-weight:400; font-style:normal; color:#ffffff;\">优化便签的自动保存记录功能</span><span style=\" font-weight:400; font-style:normal;\">，</span><span style=\" font-weight:400; font-style:normal; color:#00ff00;\">目前若改变便签中字体的颜色与是否加粗</span><span style=\" font-weight:400; font-style:normal;\">、</span><span style=\" font-weight:400; font-style:normal; color:#55aaff;\">倾斜等，在重启程序后这些设置都会消失</span><span style=\" font-weight:400; font-style:normal;\">，</span><span style=\" font-weight:400; font-style:normal; color:#ffff00;\">这不是一个好的现象</span><span style=\" font-weight:400; font-style:normal;\">，</span>将这些内容都记录在自动保存的文件中<span style=\" font-weight:400; font-style:normal;\">，</span><span style=\" font-style:normal;\">便于重启应用后还可以加载到与上次创建的一模一样的便签</span><span style=\" font-weight:400; font-style:normal;\">，</span><span style=\" font-weight:400;\">且在备份和恢复时也要保留原来的便签内容及格式</span></p></body></html>",
     "opacity": 1.0,
     "always_on_top": true,
     "geometry": {
-        "x": 1728,
-        "y": 322,
-        "width": 620,
-        "height": 564
+        "x": 906,
+        "y": 614,
+        "width": 640,
+        "height": 480
     },
-    "theme": "fresh_blue.css",
+    "theme": "sunset_orange.css",
     "title_font_size": 16,
     "content_font_size": 16,
     "auto_format_enabled": true,
     "font_settings": {
         "family": "方正舒体",
-        "size": 25,
+        "size": 18,
         "bold": true,
         "italic": true
     },
-    "font_color": "#ffffff"
+    "font_color": "#ffffff",
+    "plain_content": "优化便签的自动保存记录功能，目前若改变便签中字体的颜色与是否加粗、倾斜等，在重启程序后这些设置都会消失，这不是一个好的现象，将这些内容都记录在自动保存的文件中，便于重启应用后还可以加载到与上次创建的一模一样的便签，且在备份和恢复时也要保留原来的便签内容及格式"
 }

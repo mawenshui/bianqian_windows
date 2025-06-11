@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QScrollArea, QGridLayout, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QPoint, QRect, QMimeData, QTimer, pyqtSignal, QSize, QThread
-from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QPen, QCursor, QGuiApplication, QKeySequence, QPixmap, QTextCursor, QFontDatabase
+from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QPen, QCursor, QGuiApplication, QKeySequence, QPixmap, QTextCursor, QFontDatabase, QTextCharFormat
 
 # 导入新功能模块
 from features.search import SearchManager
@@ -124,7 +124,14 @@ class StickyNote(QWidget):
 
         # 内容编辑区域（使用自定义的 PlainTextEdit）
         self.text_edit = PlainTextEdit()
-        self.text_edit.setText(self.note_data.get('content', ''))
+        # 优先加载富文本内容，如果不存在则加载纯文本内容
+        content = self.note_data.get('content', '')
+        if content and content.startswith('<!DOCTYPE') or '<html>' in content:
+            # 如果是HTML格式，使用setHtml加载
+            self.text_edit.setHtml(content)
+        else:
+            # 否则使用setText加载纯文本
+            self.text_edit.setText(content)
         self.text_edit.textChanged.connect(self.update_content)
         main_layout.addWidget(self.text_edit)
 
@@ -144,27 +151,16 @@ class StickyNote(QWidget):
         font_layout.addWidget(self.increase_font_btn)
         
         # 添加分隔符
-        separator1 = QLabel('|')
-        separator1.setStyleSheet('color: gray; margin: 0 5px;')
-        font_layout.addWidget(separator1)
+        self.separator1 = QLabel('|')
+        # 样式将在apply_theme中动态设置
+        font_layout.addWidget(self.separator1)
         
         # 加粗按钮
         self.bold_btn = QPushButton('B')
         self.bold_btn.setFixedSize(30, 30)
         self.bold_btn.setCheckable(True)
         self.bold_btn.setToolTip('加粗')
-        self.bold_btn.setStyleSheet('''
-            QPushButton {
-                font-weight: bold;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-            QPushButton:checked {
-                background-color: #007acc;
-                color: white;
-                border: 1px solid #005a9e;
-            }
-        ''')
+        # 样式将在apply_theme中动态设置
         self.bold_btn.clicked.connect(self.toggle_bold)
         font_layout.addWidget(self.bold_btn)
         
@@ -173,44 +169,21 @@ class StickyNote(QWidget):
         self.italic_btn.setFixedSize(30, 30)
         self.italic_btn.setCheckable(True)
         self.italic_btn.setToolTip('斜体')
-        self.italic_btn.setStyleSheet('''
-            QPushButton {
-                font-style: italic;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-            QPushButton:checked {
-                background-color: #007acc;
-                color: white;
-                border: 1px solid #005a9e;
-            }
-        ''')
+        # 样式将在apply_theme中动态设置
         self.italic_btn.clicked.connect(self.toggle_italic)
         font_layout.addWidget(self.italic_btn)
         
         # 添加分隔符
-        separator2 = QLabel('|')
-        separator2.setStyleSheet('color: gray; margin: 0 5px;')
-        font_layout.addWidget(separator2)
+        self.separator2 = QLabel('|')
+        # 样式将在apply_theme中动态设置
+        font_layout.addWidget(self.separator2)
         
         # 字体颜色按钮
         self.color_btn = QPushButton('A')
         self.color_btn.setFixedSize(30, 30)
         self.color_btn.setCheckable(True)
         self.color_btn.setToolTip('字体颜色')
-        self.color_btn.setStyleSheet('''
-            QPushButton {
-                color: red;
-                font-weight: bold;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-            QPushButton:checked {
-                background-color: #007acc;
-                color: white;
-                border: 1px solid #005a9e;
-            }
-        ''')
+        # 样式将在apply_theme中动态设置
         self.color_btn.clicked.connect(self.choose_font_color)
         font_layout.addWidget(self.color_btn)
 
@@ -226,7 +199,8 @@ class StickyNote(QWidget):
         self.transparency_slider.setSingleStep(1)
         self.transparency_slider.setFixedWidth(200)  # 增加宽度以适应显示
         self.transparency_slider.valueChanged.connect(self.change_transparency)
-        toolbar.addWidget(QLabel('透明度:'))
+        self.transparency_label = QLabel('透明度:')
+        toolbar.addWidget(self.transparency_label)
         toolbar.addWidget(self.transparency_slider)
 
         self.topmost_checkbox = QCheckBox("总在最前")
@@ -529,6 +503,158 @@ class StickyNote(QWidget):
     # ... 余下的 StickyNote 类代码保持不变 ...
 
 
+    def is_dark_theme(self, theme_css_content):
+        """检测主题是否为深色主题"""
+        import re
+        # 查找StickyNote的背景色
+        bg_match = re.search(r'StickyNote\s*{[^}]*background-color:\s*([^;]+);', theme_css_content)
+        if bg_match:
+            bg_color = bg_match.group(1).strip()
+            # 简单的深色检测：检查是否包含深色关键词或RGB值
+            dark_keywords = ['#2', '#3', '#4', '#5', 'black', 'dark']
+            return any(keyword in bg_color.lower() for keyword in dark_keywords)
+        return False
+    
+    def get_adaptive_control_styles(self, is_dark):
+        """根据主题明暗度获取自适应控件样式"""
+        if is_dark:
+            # 深色主题样式
+            return {
+                'separator_color': '#CCCCCC',
+                'button_bg': '#555555',
+                'button_color': '#FFFFFF',
+                'button_border': '#777777',
+                'button_hover_bg': '#666666',
+                'button_checked_bg': '#007acc',
+                'button_checked_color': '#FFFFFF'
+            }
+        else:
+            # 浅色主题样式
+            return {
+                'separator_color': '#666666',
+                'button_bg': '#F0F0F0',
+                'button_color': '#000000',
+                'button_border': '#CCCCCC',
+                'button_hover_bg': '#E0E0E0',
+                'button_checked_bg': '#007acc',
+                'button_checked_color': '#FFFFFF'
+            }
+    
+    def apply_adaptive_control_styles(self, styles):
+        """应用自适应控件样式"""
+        # 更新分隔符和标签样式
+        if hasattr(self, 'separator1'):
+            self.separator1.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        if hasattr(self, 'separator2'):
+            self.separator2.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        if hasattr(self, 'transparency_label'):
+            self.transparency_label.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        
+        # 更新按钮样式
+        button_style_template = '''
+            QPushButton {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                border-radius: 3px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton:checked {{
+                background-color: {checked_bg};
+                color: {checked_color};
+                border: 1px solid {checked_bg};
+            }}
+        '''
+        
+        # 应用到字体大小调整按钮
+        font_button_style = button_style_template.format(
+            bg=styles['button_bg'],
+            color=styles['button_color'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'decrease_font_btn'):
+            self.decrease_font_btn.setStyleSheet(font_button_style)
+        if hasattr(self, 'increase_font_btn'):
+            self.increase_font_btn.setStyleSheet(font_button_style)
+        
+        # 应用到加粗按钮
+        bold_button_style = button_style_template.format(
+            bg=styles['button_bg'],
+            color=styles['button_color'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'bold_btn'):
+            self.bold_btn.setStyleSheet(bold_button_style)
+        
+        # 应用到斜体按钮（添加斜体样式）
+        italic_button_style = '''
+            QPushButton {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                border-radius: 3px;
+                font-weight: bold;
+                font-style: italic;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton:checked {{
+                background-color: {checked_bg};
+                color: {checked_color};
+                border: 1px solid {checked_bg};
+            }}
+        '''.format(
+            bg=styles['button_bg'],
+            color=styles['button_color'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'italic_btn'):
+            self.italic_btn.setStyleSheet(italic_button_style)
+        
+        # 应用到颜色按钮（保持红色字体特色）
+        color_button_style = '''
+            QPushButton {{
+                background-color: {bg};
+                color: red;
+                border: 1px solid {border};
+                border-radius: 3px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton:checked {{
+                background-color: {checked_bg};
+                color: {checked_color};
+                border: 1px solid {checked_bg};
+            }}
+        '''.format(
+            bg=styles['button_bg'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'color_btn'):
+            self.color_btn.setStyleSheet(color_button_style)
+
     def apply_theme(self):
         # 获取主题CSS文件路径
         theme_css_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'styles', self.theme)
@@ -543,7 +669,11 @@ class StickyNote(QWidget):
                 self.setStyleSheet(style)
                 self.text_edit.setStyleSheet(style)
                 self.title_edit.setStyleSheet(style)
-                # 如果有其他控件需要单独设置样式，可以在这里处理
+                
+                # 检测主题明暗度并应用自适应控件样式
+                is_dark = self.is_dark_theme(style)
+                adaptive_styles = self.get_adaptive_control_styles(is_dark)
+                self.apply_adaptive_control_styles(adaptive_styles)
                 
                 # 重新应用字体设置，确保字体设置不被主题覆盖
                 if hasattr(self, 'font_settings') and self.font_settings:
@@ -566,13 +696,15 @@ class StickyNote(QWidget):
         return {
             'title': f'便签 {self.note_id}',
             'content': '',
+            'plain_content': '',  # 新增：纯文本内容备份
             'opacity': 0.9,
             'always_on_top': True,
             'geometry': None,  # 修改为 None 以便在 initUI 中判断是否需要居中
             'theme': "soft_yellow.css",
             'title_font_size': 12,  # 新增：标题字体大小
             'content_font_size': 12,  # 新增：内容字体大小
-            'auto_format_enabled': True  # 新增：自动格式化开关
+            'auto_format_enabled': True,  # 新增：自动格式化开关
+            'font_color': '#000000'  # 新增：默认字体颜色
         }
 
     def save_note(self):
@@ -585,7 +717,10 @@ class StickyNote(QWidget):
             'height': geometry.height()
         }
         self.note_data['title'] = self.title_edit.text().strip() or f'便签 {self.note_id}'
-        self.note_data['content'] = self.text_edit.toPlainText()
+        # 保存富文本内容以保留格式
+        self.note_data['content'] = self.text_edit.toHtml()
+        # 同时保存纯文本内容作为备用
+        self.note_data['plain_content'] = self.text_edit.toPlainText()
         self.note_data['opacity'] = self.windowOpacity()
         self.note_data['always_on_top'] = self.topmost_checkbox.isChecked()
         self.note_data['theme'] = self.theme
@@ -924,12 +1059,16 @@ class StickyNote(QWidget):
             font_weight = 'bold' if font_settings.get('bold', False) else 'normal'
             font_style = 'italic' if font_settings.get('italic', False) else 'normal'
             
+            # 获取字体颜色
+            font_color = getattr(self, 'font_color', '#000000')
+            
             # 直接为每个控件设置样式，使用!important确保优先级
             font_style_sheet = f"""
             font-family: "{font_family}" !important;
             font-size: {font_size}pt !important;
             font-weight: {font_weight} !important;
             font-style: {font_style} !important;
+            color: {font_color} !important;
             """
             
             # 应用到文本编辑器和标题编辑器
@@ -944,7 +1083,44 @@ class StickyNote(QWidget):
             
             # 设置标题编辑器的新高度
             self.title_edit.setFixedHeight(calculated_height)
-    # **新增方法结束**
+            
+            # 应用富文本格式到编辑器的当前字符格式
+            self.apply_rich_text_format()
+    
+    def apply_rich_text_format(self):
+        """应用富文本格式设置到编辑器"""
+        # 获取字体设置
+        font_settings = getattr(self, 'font_settings', {})
+        font_color = getattr(self, 'font_color', '#000000')
+        
+        # 为文本编辑器设置默认字符格式
+        text_char_format = QTextCharFormat()
+        if font_settings:
+            font = QFont()
+            font.setFamily(font_settings.get('family', '微软雅黑'))
+            font.setPointSize(font_settings.get('size', 12))
+            font.setBold(font_settings.get('bold', False))
+            font.setItalic(font_settings.get('italic', False))
+            text_char_format.setFont(font)
+        text_char_format.setForeground(QColor(font_color))
+        self.text_edit.setCurrentCharFormat(text_char_format)
+        
+        # 为标题编辑器设置默认字符格式
+        title_char_format = QTextCharFormat()
+        if font_settings:
+            title_font = QFont()
+            title_font.setFamily(font_settings.get('family', '微软雅黑'))
+            title_font.setPointSize(font_settings.get('size', 12))
+            title_font.setBold(font_settings.get('bold', False))
+            title_font.setItalic(font_settings.get('italic', False))
+            title_char_format.setFont(title_font)
+        title_char_format.setForeground(QColor(font_color))
+        
+        # 应用到标题编辑器（QLineEdit需要特殊处理）
+        title_palette = self.title_edit.palette()
+        title_palette.setColor(QPalette.Text, QColor(font_color))
+        self.title_edit.setPalette(title_palette)
+     # **新增方法结束**
 
 class SettingsDialog(QDialog):
     def __init__(self, manager, parent=None):
