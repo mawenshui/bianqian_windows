@@ -15,12 +15,12 @@ from PyQt5.QtCore import Qt, QCoreApplication, QPoint, QRect, QMimeData, QTimer,
 from PyQt5.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QPen, QCursor, QGuiApplication, QKeySequence, QPixmap, QTextCursor, QFontDatabase, QTextCharFormat
 
 # 导入新功能模块
-from features.search import SearchManager
 from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit
 from features.shortcuts import ShortcutManager
-from features.backup import BackupManager
-from features.positioning import get_position_manager
 from features.formatter import SmartTextEdit, ContentFormatter
+
+# 导入工具模块
+from core.utils import LazyLoader, NoteCache, get_cached_setting
 
 # 定义常量用于窗口调整大小
 RESIZE_MARGIN = 10  # 调整大小检测边界宽度
@@ -186,6 +186,32 @@ class StickyNote(QWidget):
         # 样式将在apply_theme中动态设置
         self.color_btn.clicked.connect(self.choose_font_color)
         font_layout.addWidget(self.color_btn)
+        
+        # 添加分隔符
+        self.separator3 = QLabel('|')
+        # 样式将在apply_theme中动态设置
+        font_layout.addWidget(self.separator3)
+        
+        # 提醒按钮
+        self.reminder_btn = QPushButton('提醒')
+        self.reminder_btn.setFixedSize(50, 30)
+        self.reminder_btn.setToolTip('设置提醒')
+        # 样式将在apply_theme中动态设置
+        self.reminder_btn.clicked.connect(self.show_reminder_dialog)
+        font_layout.addWidget(self.reminder_btn)
+        
+        # 添加分隔符
+        self.separator4 = QLabel('|')
+        # 样式将在apply_theme中动态设置
+        font_layout.addWidget(self.separator4)
+        
+        # 标签按钮
+        self.tag_btn = QPushButton('标签')
+        self.tag_btn.setFixedSize(50, 30)
+        self.tag_btn.setToolTip('管理标签')
+        # 样式将在apply_theme中动态设置
+        self.tag_btn.clicked.connect(self.show_tag_dialog)
+        font_layout.addWidget(self.tag_btn)
 
         font_layout.addStretch()
         main_layout.addLayout(font_layout)
@@ -304,24 +330,26 @@ class StickyNote(QWidget):
                 saved_geometry.get('height', 300)
             ))
             # 注册窗口位置
-            position_manager = get_position_manager()
-            position_manager.register_window_position(
-                self.note_id, 
-                QPoint(saved_geometry.get('x', 100), saved_geometry.get('y', 100)), 
-                QSize(saved_geometry.get('width', 400), saved_geometry.get('height', 300))
-            )
+            if self.manager:
+                position_manager = self.manager.get_position_manager()
+                position_manager.register_window_position(
+                    self.note_id, 
+                    QPoint(saved_geometry.get('x', 100), saved_geometry.get('y', 100)), 
+                    QSize(saved_geometry.get('width', 400), saved_geometry.get('height', 300))
+                )
         else:
             # 使用智能定位
-            position_manager = get_position_manager()
-            smart_position = position_manager.get_smart_position(self.note_id)
-            self.resize(400, 300)  # 默认大小宽度调整为400
-            self.move(smart_position)
-            # 注册窗口位置
-            position_manager.register_window_position(
-                self.note_id, 
-                smart_position, 
-                QSize(400, 300)
-            )
+            if self.manager:
+                position_manager = self.manager.get_position_manager()
+                smart_position = position_manager.get_smart_position(self.note_id)
+                self.resize(400, 300)  # 默认大小宽度调整为400
+                self.move(smart_position)
+                # 注册窗口位置
+                position_manager.register_window_position(
+                    self.note_id, 
+                    smart_position, 
+                    QSize(400, 300)
+                )
 
     def set_font_size(self, title_size, content_size):
         title_font = QFont()
@@ -499,6 +527,22 @@ class StickyNote(QWidget):
             self.note_data['font_color'] = color_hex
             if not self.is_deleted:
                 self.save_note()
+    
+    def show_reminder_dialog(self):
+        """显示提醒设置对话框"""
+        if self.manager:
+            reminder_manager = self.manager.get_reminder_manager()
+            from features.reminder import ReminderDialog
+            dialog = ReminderDialog(self.note_id, reminder_manager, self)
+            dialog.exec_()
+    
+    def show_tag_dialog(self):
+        """显示标签设置对话框"""
+        if self.manager:
+            tag_manager = self.manager.get_tag_manager()
+            from features.tags import TagDialog
+            dialog = TagDialog(self.note_id, tag_manager, self)
+            dialog.exec_()
 
     # ... 余下的 StickyNote 类代码保持不变 ...
 
@@ -547,25 +591,37 @@ class StickyNote(QWidget):
             self.separator1.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
         if hasattr(self, 'separator2'):
             self.separator2.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        if hasattr(self, 'separator3'):
+            self.separator3.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        if hasattr(self, 'separator4'):
+            self.separator4.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
         if hasattr(self, 'transparency_label'):
             self.transparency_label.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
         
         # 更新按钮样式
         button_style_template = '''
-            QPushButton {{
+            QPushButton {{ 
                 background-color: {bg};
                 color: {color};
                 border: 1px solid {border};
                 border-radius: 3px;
                 font-weight: bold;
+                padding: 5px 10px;
+                transition: all 0.2s ease;
             }}
             QPushButton:hover {{
                 background-color: {hover_bg};
+                transform: translateY(-1px);
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
             }}
             QPushButton:checked {{
                 background-color: {checked_bg};
                 color: {checked_color};
                 border: 1px solid {checked_bg};
+            }}
+            QPushButton:pressed {{
+                transform: translateY(0);
+                box-shadow: none;
             }}
         '''
         
@@ -654,6 +710,32 @@ class StickyNote(QWidget):
         
         if hasattr(self, 'color_btn'):
             self.color_btn.setStyleSheet(color_button_style)
+        
+        # 应用到提醒按钮
+        reminder_button_style = button_style_template.format(
+            bg=styles['button_bg'],
+            color=styles['button_color'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'reminder_btn'):
+            self.reminder_btn.setStyleSheet(reminder_button_style)
+        
+        # 应用到标签按钮
+        tag_button_style = button_style_template.format(
+            bg=styles['button_bg'],
+            color=styles['button_color'],
+            border=styles['button_border'],
+            hover_bg=styles['button_hover_bg'],
+            checked_bg=styles['button_checked_bg'],
+            checked_color=styles['button_checked_color']
+        )
+        
+        if hasattr(self, 'tag_btn'):
+            self.tag_btn.setStyleSheet(tag_button_style)
 
     def apply_theme(self):
         # 获取主题CSS文件路径
@@ -682,6 +764,11 @@ class StickyNote(QWidget):
             QMessageBox.warning(self, '样式加载错误', f'无法加载样式文件: {e}')
 
     def load_note(self):
+        # 使用缓存加载便签数据
+        if hasattr(self.manager, 'note_cache'):
+            return self.manager.note_cache.get_note(self.note_id, self.notes_dir)
+        
+        # 备用方案：直接从文件加载
         if os.path.exists(self.note_file):
             try:
                 with open(self.note_file, 'r', encoding='utf-8') as f:
@@ -737,6 +824,10 @@ class StickyNote(QWidget):
         try:
             with open(self.note_file, 'w', encoding='utf-8') as f:
                 json.dump(self.note_data, f, ensure_ascii=False, indent=4)
+            
+            # 更新缓存
+            if hasattr(self.manager, 'note_cache'):
+                self.manager.note_cache.update_note(self.note_id, self.note_data)
         except Exception as e:
             QMessageBox.warning(self, '保存错误', f'无法保存便签文件: {e}')
 
@@ -807,7 +898,34 @@ class StickyNote(QWidget):
 
     # **修改方法名称：将 close_note 改为 hide_note**
     def hide_note(self):
-        self.hide()
+        # 添加淡出动画
+        self.fade_out()
+    
+    def fade_out(self):
+        """淡出动画"""
+        from PyQt5.QtCore import QPropertyAnimation, QEasingCurve
+        
+        animation = QPropertyAnimation(self, b"windowOpacity")
+        animation.setDuration(300)
+        animation.setStartValue(self.windowOpacity())
+        animation.setEndValue(0)
+        animation.setEasingCurve(QEasingCurve.OutQuad)
+        animation.finished.connect(self.hide)
+        animation.start()
+    
+    def show(self):
+        """重写 show 方法，添加淡入动画"""
+        super().show()
+        # 添加淡入动画
+        self.setWindowOpacity(0)
+        from PyQt5.QtCore import QPropertyAnimation, QEasingCurve
+        
+        animation = QPropertyAnimation(self, b"windowOpacity")
+        animation.setDuration(300)
+        animation.setStartValue(0)
+        animation.setEndValue(self.note_data.get('opacity', 0.9))
+        animation.setEasingCurve(QEasingCurve.InQuad)
+        animation.start()
     # **修改方法结束**
 
     # 实现拖动和调整大小功能
@@ -855,6 +973,8 @@ class StickyNote(QWidget):
                 self.resize_dir = 'bottom'
             else:
                 self.dragging = True
+                # 添加点击效果
+                self.setWindowOpacity(self.windowOpacity() * 0.9)
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -886,6 +1006,9 @@ class StickyNote(QWidget):
         self.resizing = False
         self.resize_dir = None
         self.setCursor(QCursor(Qt.ArrowCursor))
+        # 恢复透明度
+        if hasattr(self, 'note_data'):
+            self.setWindowOpacity(self.note_data.get('opacity', 0.9))
         if not self.is_deleted:
             self.save_note()
         event.accept()
@@ -1008,12 +1131,13 @@ class StickyNote(QWidget):
     def closeEvent(self, event):
         if self.is_deleted:
             # 注销窗口位置
-            position_manager = get_position_manager()
-            position_manager.unregister_window_position(
-                self.note_id, 
-                QPoint(self.x(), self.y()), 
-                QSize(self.width(), self.height())
-            )
+            if self.manager:
+                position_manager = self.manager.get_position_manager()
+                position_manager.unregister_window_position(
+                    self.note_id, 
+                    QPoint(self.x(), self.y()), 
+                    QSize(self.width(), self.height())
+                )
             super().closeEvent(event)
         else:
             event.ignore()
@@ -1392,11 +1516,12 @@ class StickyNoteManager:
             }
             self.save_settings()
 
-        # 初始化新功能模块
-        self.search_manager = SearchManager(self)
+        # 初始化性能优化模块
+        self.lazy_loader = LazyLoader()
+        self.note_cache = NoteCache(max_size=100)  # 缓存最多100个便签
+
+        # 初始化新功能模块（使用延迟加载）
         self.shortcut_manager = ShortcutManager()
-        self.backup_manager = BackupManager(self)
-        self.position_manager = get_position_manager()
         
         # 注册全局快捷键
         self.setup_global_shortcuts()
@@ -1447,13 +1572,113 @@ class StickyNoteManager:
         """
         显示搜索对话框
         """
+        # 延迟加载搜索模块
+        if not hasattr(self, 'search_manager'):
+            SearchManager = self.lazy_loader.load_module('search')
+            self.search_manager = SearchManager(self)
         self.search_manager.show_search_dialog()
     
     def show_backup_dialog(self):
         """
         显示备份管理对话框
         """
+        # 延迟加载备份模块
+        if not hasattr(self, 'backup_manager'):
+            BackupManager = self.lazy_loader.load_module('backup')
+            self.backup_manager = BackupManager(self)
         self.backup_manager.show_backup_dialog()
+    
+    def get_position_manager(self):
+        """
+        获取位置管理器（延迟加载）
+        """
+        if not hasattr(self, 'position_manager'):
+            get_position_manager = self.lazy_loader.load_module('positioning')
+            self.position_manager = get_position_manager()
+        return self.position_manager
+    
+    def get_reminder_manager(self):
+        """
+        获取提醒管理器（延迟加载）
+        """
+        if not hasattr(self, 'reminder_manager'):
+            ReminderManager = self.lazy_loader.load_module('reminder')
+            self.reminder_manager = ReminderManager(self)
+        return self.reminder_manager
+    
+    def get_tag_manager(self):
+        """
+        获取标签管理器（延迟加载）
+        """
+        if not hasattr(self, 'tag_manager'):
+            TagManager = self.lazy_loader.load_module('tags')
+            self.tag_manager = TagManager(self)
+        return self.tag_manager
+    
+    def show_tag_management(self):
+        """
+        显示标签管理界面
+        """
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QMessageBox
+        from PyQt5.QtCore import Qt
+        
+        tag_manager = self.get_tag_manager()
+        all_tags = tag_manager.get_all_tags()
+        
+        dialog = QDialog()
+        dialog.setWindowTitle('标签管理')
+        dialog.setFixedSize(500, 400)
+        
+        layout = QVBoxLayout()
+        
+        # 标签列表
+        tags_list = QListWidget()
+        for tag in all_tags:
+            item = QListWidgetItem(tag)
+            notes_count = len(tag_manager.get_notes_by_tag(tag))
+            item.setToolTip(f"包含 {notes_count} 个便签")
+            tags_list.addItem(item)
+        layout.addWidget(tags_list)
+        
+        # 按钮
+        button_layout = QHBoxLayout()
+        delete_btn = QPushButton('删除标签')
+        delete_btn.clicked.connect(lambda: self.delete_tag(tags_list.currentItem().text() if tags_list.currentItem() else None))
+        button_layout.addStretch()
+        button_layout.addWidget(delete_btn)
+        layout.addLayout(button_layout)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def delete_tag(self, tag):
+        """
+        删除标签
+        
+        Args:
+            tag: 标签名称
+        """
+        if not tag:
+            QMessageBox.warning(None, '删除标签', '请选择要删除的标签')
+            return
+        
+        tag_manager = self.get_tag_manager()
+        notes_with_tag = tag_manager.get_notes_by_tag(tag)
+        
+        if notes_with_tag:
+            reply = QMessageBox.question(
+                None, '删除标签',
+                f'此标签已应用到 {len(notes_with_tag)} 个便签，确定要删除吗？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        # 从所有便签中移除标签
+        for note_id in notes_with_tag:
+            tag_manager.remove_tag_from_note(note_id, tag)
+        
+        QMessageBox.information(None, '删除成功', f'标签 "{tag}" 已删除')
     
     def handle_shortcut_activated(self, action_name):
         """
@@ -1494,6 +1719,11 @@ class StickyNoteManager:
         backup_action = QAction("备份管理 (Ctrl+Shift+B)", self.app)
         backup_action.triggered.connect(self.show_backup_dialog)
         self.tray_menu.addAction(backup_action)
+
+        # 添加标签管理选项
+        tag_action = QAction("标签管理", self.app)
+        tag_action.triggered.connect(self.show_tag_management)
+        self.tray_menu.addAction(tag_action)
 
         # 分割线
         self.tray_menu.addSeparator()
