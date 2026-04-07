@@ -51,6 +51,16 @@ class SettingsDialog(QDialog):
         self.setup_font_tab(font_tab)
         tab_widget.addTab(font_tab, "字体设置")
         
+        # 快捷键设置标签页
+        shortcut_tab = QWidget()
+        self.setup_shortcut_tab(shortcut_tab)
+        tab_widget.addTab(shortcut_tab, "快捷键设置")
+        
+        # 语言设置标签页
+        language_tab = QWidget()
+        self.setup_language_tab(language_tab)
+        tab_widget.addTab(language_tab, "语言设置")
+        
         main_layout = QVBoxLayout()
         main_layout.addWidget(tab_widget)
         
@@ -258,6 +268,119 @@ class SettingsDialog(QDialog):
         # 触发字体更新
         self.on_font_changed()
     
+    def setup_shortcut_tab(self, tab_widget):
+        """设置快捷键标签页"""
+        layout = QVBoxLayout()
+        
+        # 快捷键设置区域
+        shortcut_group = QGroupBox("全局快捷键设置")
+        shortcut_layout = QFormLayout()
+        
+        # 加载当前快捷键设置
+        self.shortcuts = {
+            'add_note': 'Ctrl+Shift+N',
+            'show_search_dialog': 'Ctrl+Shift+F',
+            'show_backup_dialog': 'Ctrl+Shift+B'
+        }
+        
+        # 添加便签快捷键
+        self.add_note_shortcut_edit = QLineEdit(self.shortcuts['add_note'])
+        shortcut_layout.addRow("添加便签:", self.add_note_shortcut_edit)
+        
+        # 搜索便签快捷键
+        self.search_shortcut_edit = QLineEdit(self.shortcuts['show_search_dialog'])
+        shortcut_layout.addRow("搜索便签:", self.search_shortcut_edit)
+        
+        # 备份管理快捷键
+        self.backup_shortcut_edit = QLineEdit(self.shortcuts['show_backup_dialog'])
+        shortcut_layout.addRow("备份管理:", self.backup_shortcut_edit)
+        
+        shortcut_group.setLayout(shortcut_layout)
+        layout.addWidget(shortcut_group)
+        
+        # 保存按钮
+        save_layout = QHBoxLayout()
+        save_layout.addStretch()
+        save_shortcut_btn = QPushButton("保存快捷键设置")
+        save_shortcut_btn.clicked.connect(self.save_shortcut_settings)
+        save_layout.addWidget(save_shortcut_btn)
+        layout.addLayout(save_layout)
+        
+        tab_widget.setLayout(layout)
+    
+    def save_shortcut_settings(self):
+        """保存快捷键设置"""
+        # 获取新的快捷键设置
+        new_shortcuts = {
+            'add_note': self.add_note_shortcut_edit.text(),
+            'show_search_dialog': self.search_shortcut_edit.text(),
+            'show_backup_dialog': self.backup_shortcut_edit.text()
+        }
+        
+        # 这里可以添加快捷键验证逻辑
+        
+        # 保存到设置
+        self.manager.settings['shortcuts'] = new_shortcuts
+        self.manager.save_settings()
+        
+        # 重新注册快捷键
+        self.manager.shortcut_manager.cleanup()
+        self.manager.setup_global_shortcuts()
+        
+        QMessageBox.information(self, "快捷键设置", "快捷键设置已保存")
+    
+    def setup_language_tab(self, tab_widget):
+        """设置语言标签页"""
+        layout = QVBoxLayout()
+        
+        # 语言选择区域
+        language_group = QGroupBox("语言选择")
+        language_layout = QFormLayout()
+        
+        self.language_label = QLabel("选择界面语言:")
+        self.language_combo = QComboBox()
+        
+        # 加载可用语言
+        self.languages = {
+            'zh_CN': '简体中文',
+            'en_US': 'English'
+        }
+        
+        for lang_code, lang_name in self.languages.items():
+            self.language_combo.addItem(lang_name, lang_code)
+        
+        # 设置当前语言
+        current_language = self.manager.settings.get('language', 'zh_CN')
+        index = self.language_combo.findData(current_language)
+        if index != -1:
+            self.language_combo.setCurrentIndex(index)
+        
+        language_layout.addRow(self.language_label, self.language_combo)
+        language_group.setLayout(language_layout)
+        layout.addWidget(language_group)
+        
+        # 保存按钮
+        save_layout = QHBoxLayout()
+        save_layout.addStretch()
+        save_language_btn = QPushButton("保存语言设置")
+        save_language_btn.clicked.connect(self.save_language_settings)
+        save_layout.addWidget(save_language_btn)
+        layout.addLayout(save_layout)
+        
+        tab_widget.setLayout(layout)
+    
+    def save_language_settings(self):
+        """保存语言设置"""
+        # 获取选中的语言
+        selected_index = self.language_combo.currentIndex()
+        selected_language = self.language_combo.itemData(selected_index)
+        
+        # 保存到设置
+        self.manager.settings['language'] = selected_language
+        self.manager.save_settings()
+        
+        QMessageBox.information(self, "语言设置", "语言设置已保存，重启应用后生效")
+    
     def change_theme(self):
         """保持向后兼容性"""
         self.on_theme_changed()
@@ -331,21 +454,28 @@ class StickyNoteManager:
         设置全局快捷键
         """
         try:
-            # 注册创建新便签的快捷键 (Ctrl+Shift+N)
+            # 加载保存的快捷键设置
+            shortcuts = self.settings.get('shortcuts', {
+                'add_note': 'Ctrl+Shift+N',
+                'show_search_dialog': 'Ctrl+Shift+F',
+                'show_backup_dialog': 'Ctrl+Shift+B'
+            })
+            
+            # 注册创建新便签的快捷键
             self.shortcut_manager.register_global_shortcut(
-                'Ctrl+Shift+N', 
+                shortcuts.get('add_note', 'Ctrl+Shift+N'), 
                 'add_note'
             )
             
-            # 注册搜索便签的快捷键 (Ctrl+Shift+F)
+            # 注册搜索便签的快捷键
             self.shortcut_manager.register_global_shortcut(
-                'Ctrl+Shift+F', 
+                shortcuts.get('show_search_dialog', 'Ctrl+Shift+F'), 
                 'show_search_dialog'
             )
             
-            # 注册备份管理的快捷键 (Ctrl+Shift+B)
+            # 注册备份管理的快捷键
             self.shortcut_manager.register_global_shortcut(
-                'Ctrl+Shift+B', 
+                shortcuts.get('show_backup_dialog', 'Ctrl+Shift+B'), 
                 'show_backup_dialog'
             )
             

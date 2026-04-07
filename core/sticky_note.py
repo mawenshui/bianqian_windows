@@ -6,10 +6,10 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QTextEdit, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QMessageBox, QCheckBox,
     QColorDialog, QFrame, QDialog, QLineEdit, QListWidget, QListWidgetItem,
-    QInputDialog, QSystemTrayIcon
+    QInputDialog, QSystemTrayIcon, QFileDialog, QDateTimeEdit, QComboBox
 )
-from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QSize
-from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QTextCursor, QTextCharFormat, QPainter, QPen
+from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QSize, QDateTime, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QTextCursor, QTextCharFormat, QPainter, QPen, QTextDocument
 
 # 导入新功能模块
 from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit
@@ -197,6 +197,62 @@ class StickyNote(QWidget):
         self.group_btn.clicked.connect(self.show_group_manager)
         font_layout.addWidget(self.group_btn)
 
+        # 待办事项按钮
+        self.todo_btn = QPushButton('待办')
+        self.todo_btn.setFixedSize(40, 30)
+        self.todo_btn.setToolTip('待办事项')
+        # 样式将在apply_theme中动态设置
+        self.todo_btn.clicked.connect(self.add_todo_item)
+        font_layout.addWidget(self.todo_btn)
+
+        # 代码高亮按钮
+        self.code_btn = QPushButton('代码')
+        self.code_btn.setFixedSize(40, 30)
+        self.code_btn.setToolTip('代码高亮')
+        # 样式将在apply_theme中动态设置
+        self.code_btn.clicked.connect(self.toggle_code_highlight)
+        font_layout.addWidget(self.code_btn)
+
+        # 图片插入按钮
+        self.image_btn = QPushButton('图片')
+        self.image_btn.setFixedSize(40, 30)
+        self.image_btn.setToolTip('插入本地图片')
+        # 样式将在apply_theme中动态设置
+        self.image_btn.clicked.connect(self.insert_local_image)
+        font_layout.addWidget(self.image_btn)
+
+        # 文件链接按钮
+        self.link_btn = QPushButton('链接')
+        self.link_btn.setFixedSize(40, 30)
+        self.link_btn.setToolTip('添加本地文件链接')
+        # 样式将在apply_theme中动态设置
+        self.link_btn.clicked.connect(self.add_local_file_link)
+        font_layout.addWidget(self.link_btn)
+
+        # 提醒按钮
+        self.reminder_btn = QPushButton('提醒')
+        self.reminder_btn.setFixedSize(40, 30)
+        self.reminder_btn.setToolTip('设置提醒')
+        # 样式将在apply_theme中动态设置
+        self.reminder_btn.clicked.connect(self.set_reminder)
+        font_layout.addWidget(self.reminder_btn)
+
+        # 查找按钮
+        self.find_btn = QPushButton('查找')
+        self.find_btn.setFixedSize(40, 30)
+        self.find_btn.setToolTip('查找和替换')
+        # 样式将在apply_theme中动态设置
+        self.find_btn.clicked.connect(self.show_find_replace)
+        font_layout.addWidget(self.find_btn)
+
+        # 阅读模式按钮
+        self.read_mode_btn = QPushButton('阅读')
+        self.read_mode_btn.setFixedSize(40, 30)
+        self.read_mode_btn.setToolTip('阅读模式')
+        # 样式将在apply_theme中动态设置
+        self.read_mode_btn.clicked.connect(self.toggle_read_mode)
+        font_layout.addWidget(self.read_mode_btn)
+
         font_layout.addStretch()
         main_layout.addLayout(font_layout)
 
@@ -228,6 +284,10 @@ class StickyNote(QWidget):
         self.transparency_label = QLabel('透明度:')
         toolbar.addWidget(self.transparency_label)
         toolbar.addWidget(self.transparency_slider)
+
+        # 字数统计
+        self.word_count_label = QLabel('字数: 0')
+        toolbar.addWidget(self.word_count_label)
 
         self.topmost_checkbox = QCheckBox("总在最前")
         self.topmost_checkbox.setChecked(self.note_data.get('always_on_top', True))
@@ -356,6 +416,9 @@ class StickyNote(QWidget):
                 smart_position, 
                 QSize(400, 300)
             )
+        
+        # 初始化字数统计
+        self.update_word_count()
 
     def set_font_size(self, title_size, content_size):
         title_font = QFont()
@@ -781,8 +844,17 @@ class StickyNote(QWidget):
             self.manager.update_tray_menu()
 
     def update_content(self):
+        # 更新字数统计
+        self.update_word_count()
         if not self.is_deleted:
             self.save_note()
+    
+    def update_word_count(self):
+        """更新字数统计"""
+        text = self.text_edit.toPlainText()
+        char_count = len(text)
+        word_count = len(text.split())
+        self.word_count_label.setText(f'字数: {word_count} | 字符: {char_count}')
 
     def change_transparency(self, value):
         opacity = value / 100.0
@@ -840,7 +912,35 @@ class StickyNote(QWidget):
 
     # **修改方法名称：将 close_note 改为 hide_note**
     def hide_note(self):
-        self.hide()
+        """隐藏便签（带动画）"""
+        self.animate_close()
+    
+    def show(self):
+        """显示便签（带动画）"""
+        super().show()
+        self.animate_open()
+    
+    def animate_open(self):
+        """打开动画"""
+        # 创建动画
+        animation = QPropertyAnimation(self, b"windowOpacity")
+        animation.setDuration(300)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.start()
+    
+    def animate_close(self):
+        """关闭动画"""
+        # 创建动画
+        animation = QPropertyAnimation(self, b"windowOpacity")
+        animation.setDuration(300)
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
+        animation.setEasingCurve(QEasingCurve.InCubic)
+        # 动画结束后隐藏窗口
+        animation.finished.connect(self.hide)
+        animation.start()
     # **修改方法结束**
 
     # 实现拖动和调整大小功能
@@ -1482,4 +1582,345 @@ class StickyNote(QWidget):
         
         # 添加拉伸空间
         self.group_layout.addStretch()
-     # **新增方法结束**
+    
+    def add_todo_item(self):
+        """添加待办事项"""
+        cursor = self.text_edit.textCursor()
+        # 插入待办事项模板
+        todo_template = "[ ] 待办事项\n"
+        cursor.insertText(todo_template)
+        # 移动光标到待办事项文本后面
+        cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, len(" 待办事项"))
+        self.text_edit.setTextCursor(cursor)
+        if not self.is_deleted:
+            self.save_note()
+    
+    def toggle_todo_item(self):
+        """切换待办事项状态"""
+        cursor = self.text_edit.textCursor()
+        # 移动到当前行的开始
+        cursor.movePosition(QTextCursor.StartOfLine)
+        # 选择行的前3个字符
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 3)
+        selected_text = cursor.selectedText()
+        
+        if selected_text == "[ ]":
+            # 标记为已完成
+            cursor.insertText("[x]")
+        elif selected_text == "[x]":
+            # 标记为未完成
+            cursor.insertText("[ ]")
+        
+        if not self.is_deleted:
+            self.save_note()
+    
+    def toggle_code_highlight(self):
+        """切换代码高亮"""
+        cursor = self.text_edit.textCursor()
+        if cursor.hasSelection():
+            # 有选中文本，应用代码高亮样式
+            char_format = QTextCharFormat()
+            # 设置代码高亮背景色
+            char_format.setBackground(QColor('#f5f5f5'))
+            # 设置等宽字体
+            font = QFont()
+            font.setFamily('Courier New')
+            char_format.setFont(font)
+            # 应用格式
+            cursor.mergeCharFormat(char_format)
+            if not self.is_deleted:
+                self.save_note()
+        else:
+            # 没有选中文本，提示用户
+            QMessageBox.information(self, '提示', '请先选择要高亮的代码文本')
+    
+    def insert_local_image(self):
+        """插入本地图片"""
+        # 打开文件选择对话框
+        file_dialog = QFileDialog()
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        file_dialog.setNameFilter('Images (*.png *.jpg *.jpeg *.bmp *.gif)')
+        
+        if file_dialog.exec_() == QFileDialog.Accepted:
+            file_path = file_dialog.selectedFiles()[0]
+            if os.path.exists(file_path):
+                # 插入图片到文本编辑器
+                cursor = self.text_edit.textCursor()
+                # 插入图片
+                cursor.insertImage(file_path)
+                if not self.is_deleted:
+                    self.save_note()
+            else:
+                QMessageBox.warning(self, '错误', '所选文件不存在')
+    
+    def add_local_file_link(self):
+        """添加本地文件链接"""
+        # 打开文件选择对话框
+        file_dialog = QFileDialog()
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        file_dialog.setOption(QFileDialog.DontUseNativeDialog, False)
+        
+        if file_dialog.exec_() == QFileDialog.Accepted:
+            file_path = file_dialog.selectedFiles()[0]
+            if os.path.exists(file_path):
+                # 获取文件名作为链接文本
+                link_text = os.path.basename(file_path)
+                # 创建HTML链接
+                # 对于本地文件，需要使用file:///协议
+                file_url = f"file:///{file_path}"
+                html_link = f'<a href="{file_url}">{link_text}</a>'
+                
+                # 插入链接到文本编辑器
+                cursor = self.text_edit.textCursor()
+                cursor.insertHtml(html_link)
+                if not self.is_deleted:
+                    self.save_note()
+            else:
+                QMessageBox.warning(self, '错误', '所选文件不存在')
+    
+    def set_reminder(self):
+        """设置提醒"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('设置提醒')
+        dialog.setFixedSize(400, 250)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        layout = QVBoxLayout()
+        
+        # 提醒时间
+        time_layout = QHBoxLayout()
+        time_label = QLabel('提醒时间:')
+        self.reminder_time_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.reminder_time_edit.setCalendarPopup(True)
+        time_layout.addWidget(time_label)
+        time_layout.addWidget(self.reminder_time_edit)
+        layout.addLayout(time_layout)
+        
+        # 重复选项
+        repeat_layout = QHBoxLayout()
+        repeat_label = QLabel('重复:')
+        self.repeat_combo = QComboBox()
+        self.repeat_combo.addItems(['不重复', '每天', '每周', '每月'])
+        repeat_layout.addWidget(repeat_label)
+        repeat_layout.addWidget(self.repeat_combo)
+        layout.addLayout(repeat_layout)
+        
+        # 提醒声音
+        sound_layout = QHBoxLayout()
+        self.sound_checkbox = QCheckBox('播放提示音')
+        self.sound_checkbox.setChecked(True)
+        sound_layout.addWidget(self.sound_checkbox)
+        layout.addLayout(sound_layout)
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton('保存')
+        save_btn.clicked.connect(partial(self.save_reminder, dialog))
+        cancel_btn = QPushButton('取消')
+        cancel_btn.clicked.connect(dialog.close)
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def save_reminder(self, dialog):
+        """保存提醒设置"""
+        reminder_time = self.reminder_time_edit.dateTime().toString(Qt.ISODate)
+        repeat = self.repeat_combo.currentText()
+        sound = self.sound_checkbox.isChecked()
+        
+        # 保存提醒设置
+        self.note_data['reminder'] = {
+            'time': reminder_time,
+            'repeat': repeat,
+            'sound': sound
+        }
+        
+        if not self.is_deleted:
+            self.save_note()
+        
+        QMessageBox.information(self, '提醒设置', '提醒已设置')
+        dialog.close()
+    
+    def show_find_replace(self):
+        """显示查找和替换对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('查找和替换')
+        dialog.setFixedSize(400, 200)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        layout = QVBoxLayout()
+        
+        # 查找输入
+        find_layout = QHBoxLayout()
+        find_label = QLabel('查找:')
+        self.find_edit = QLineEdit()
+        find_layout.addWidget(find_label)
+        find_layout.addWidget(self.find_edit)
+        layout.addLayout(find_layout)
+        
+        # 替换输入
+        replace_layout = QHBoxLayout()
+        replace_label = QLabel('替换:')
+        self.replace_edit = QLineEdit()
+        replace_layout.addWidget(replace_label)
+        replace_layout.addWidget(self.replace_edit)
+        layout.addLayout(replace_layout)
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        find_next_btn = QPushButton('查找下一个')
+        find_next_btn.clicked.connect(self.find_next)
+        replace_btn = QPushButton('替换')
+        replace_btn.clicked.connect(self.replace_current)
+        replace_all_btn = QPushButton('全部替换')
+        replace_all_btn.clicked.connect(self.replace_all)
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(dialog.close)
+        
+        button_layout.addWidget(find_next_btn)
+        button_layout.addWidget(replace_btn)
+        button_layout.addWidget(replace_all_btn)
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
+    def find_next(self):
+        """查找下一个匹配项"""
+        text = self.find_edit.text()
+        if text:
+            cursor = self.text_edit.textCursor()
+            # 从当前位置开始查找
+            found = self.text_edit.find(text, QTextDocument.FindCaseSensitively)
+            if not found:
+                # 如果没找到，从文档开始查找
+                cursor.movePosition(QTextCursor.Start)
+                self.text_edit.setTextCursor(cursor)
+                found = self.text_edit.find(text, QTextDocument.FindCaseSensitively)
+                if not found:
+                    QMessageBox.information(self, '查找', '未找到匹配项')
+    
+    def replace_current(self):
+        """替换当前匹配项"""
+        text = self.find_edit.text()
+        replacement = self.replace_edit.text()
+        if text:
+            cursor = self.text_edit.textCursor()
+            if cursor.hasSelection():
+                cursor.insertText(replacement)
+                if not self.is_deleted:
+                    self.save_note()
+                # 查找下一个
+                self.find_next()
+    
+    def replace_all(self):
+        """替换所有匹配项"""
+        text = self.find_edit.text()
+        replacement = self.replace_edit.text()
+        if text:
+            # 从文档开始
+            cursor = self.text_edit.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            self.text_edit.setTextCursor(cursor)
+            
+            count = 0
+            while self.text_edit.find(text, QTextDocument.FindCaseSensitively):
+                cursor = self.text_edit.textCursor()
+                cursor.insertText(replacement)
+                count += 1
+            
+            if count > 0:
+                QMessageBox.information(self, '替换', f'已替换 {count} 个匹配项')
+                if not self.is_deleted:
+                    self.save_note()
+            else:
+                QMessageBox.information(self, '替换', '未找到匹配项')
+    
+    def toggle_read_mode(self):
+        """切换阅读模式"""
+        # 检查当前是否处于阅读模式
+        if not hasattr(self, 'read_mode'):
+            self.read_mode = False
+        
+        self.read_mode = not self.read_mode
+        
+        if self.read_mode:
+            # 进入阅读模式，隐藏工具栏和其他控件
+            self.title_edit.hide()
+            self.decrease_font_btn.hide()
+            self.increase_font_btn.hide()
+            self.separator1.hide()
+            self.bold_btn.hide()
+            self.italic_btn.hide()
+            self.separator2.hide()
+            self.color_btn.hide()
+            self.tag_btn.hide()
+            self.group_btn.hide()
+            self.todo_btn.hide()
+            self.code_btn.hide()
+            self.image_btn.hide()
+            self.link_btn.hide()
+            self.reminder_btn.hide()
+            self.find_btn.hide()
+            self.read_mode_btn.hide()
+            self.tags_container.hide()
+            self.group_container.hide()
+            self.transparency_slider.hide()
+            self.transparency_label.hide()
+            self.topmost_checkbox.hide()
+            self.format_checkbox.hide()
+            # 找到删除和隐藏按钮所在的布局并隐藏
+            for i in range(self.layout().count()):
+                item = self.layout().itemAt(i)
+                if isinstance(item, QHBoxLayout):
+                    # 检查是否是包含删除和隐藏按钮的布局
+                    for j in range(item.count()):
+                        widget = item.itemAt(j).widget()
+                        if widget and isinstance(widget, QPushButton) and (widget.text() == '删除' or widget.text() == '隐藏'):
+                            widget.hide()
+            # 设置文本编辑器为只读
+            self.text_edit.setReadOnly(True)
+            # 最大化窗口
+            self.showMaximized()
+        else:
+            # 退出阅读模式，显示所有控件
+            self.title_edit.show()
+            self.decrease_font_btn.show()
+            self.increase_font_btn.show()
+            self.separator1.show()
+            self.bold_btn.show()
+            self.italic_btn.show()
+            self.separator2.show()
+            self.color_btn.show()
+            self.tag_btn.show()
+            self.group_btn.show()
+            self.todo_btn.show()
+            self.code_btn.show()
+            self.image_btn.show()
+            self.link_btn.show()
+            self.reminder_btn.show()
+            self.find_btn.show()
+            self.read_mode_btn.show()
+            self.tags_container.show()
+            self.group_container.show()
+            self.transparency_slider.show()
+            self.transparency_label.show()
+            self.topmost_checkbox.show()
+            self.format_checkbox.show()
+            # 找到删除和隐藏按钮所在的布局并显示
+            for i in range(self.layout().count()):
+                item = self.layout().itemAt(i)
+                if isinstance(item, QHBoxLayout):
+                    # 检查是否是包含删除和隐藏按钮的布局
+                    for j in range(item.count()):
+                        widget = item.itemAt(j).widget()
+                        if widget and isinstance(widget, QPushButton) and (widget.text() == '删除' or widget.text() == '隐藏'):
+                            widget.show()
+            # 设置文本编辑器为可编辑
+            self.text_edit.setReadOnly(False)
+            # 恢复窗口大小
+            self.showNormal()
