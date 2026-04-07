@@ -74,6 +74,7 @@ class StickyNote(QWidget):
         self.note_id = note_id
         self.manager = manager  # Reference to Manager
         self.is_deleted = False  # 标记便签是否已被删除
+        self._initial_version_saved = False  # 标记是否已保存初始版本
 
         # 将 notes_dir 转换为绝对路径，避免相对路径问题
         self.notes_dir = os.path.abspath(notes_dir)
@@ -252,6 +253,14 @@ class StickyNote(QWidget):
         # 样式将在apply_theme中动态设置
         self.read_mode_btn.clicked.connect(self.toggle_read_mode)
         font_layout.addWidget(self.read_mode_btn)
+
+        # 版本历史按钮
+        self.history_btn = QPushButton('历史')
+        self.history_btn.setFixedSize(40, 30)
+        self.history_btn.setToolTip('版本历史')
+        # 样式将在apply_theme中动态设置
+        self.history_btn.clicked.connect(self.show_version_history)
+        font_layout.addWidget(self.history_btn)
 
         font_layout.addStretch()
         main_layout.addLayout(font_layout)
@@ -833,8 +842,28 @@ class StickyNote(QWidget):
         try:
             with open(self.note_file, 'w', encoding='utf-8') as f:
                 json.dump(self.note_data, f, ensure_ascii=False, indent=4)
+            
+            # 保存版本历史（首次保存或内容变化时）
+            if self.manager and hasattr(self.manager, 'version_history_manager'):
+                if not self._initial_version_saved:
+                    # 首次保存，保存初始版本
+                    self.manager.version_history_manager.save_version(
+                        self.note_id, 
+                        self.note_data.copy(), 
+                        '初始版本'
+                    )
+                    self._initial_version_saved = True
+                else:
+                    # 检查内容是否有显著变化
+                    # 可以添加更智能的版本保存逻辑，比如每隔一定时间或内容变化较大时
+                    pass
         except Exception as e:
             QMessageBox.warning(self, '保存错误', f'无法保存便签文件: {e}')
+    
+    def show_version_history(self):
+        """显示版本历史"""
+        if self.manager and hasattr(self.manager, 'version_history_manager'):
+            self.manager.version_history_manager.show_version_history_dialog(self.note_id)
 
     def update_title(self):
         self.setWindowTitle(self.title_edit.text().strip() or f'便签 {self.note_id}')
@@ -878,15 +907,23 @@ class StickyNote(QWidget):
     def delete_note(self):
         reply = QMessageBox.question(
             self, '删除便签',
-            f"确定要删除便签 '{self.note_data.get('title', '')}' 吗？",
+            f"确定要删除便签 '{self.note_data.get('title', '')}' 吗？\n\n便签将被移动到回收站，可以在那里恢复。",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
             try:
-                # 打印要删除的文件路径用于调试
-                print(f"尝试删除文件: {self.note_file}")
-
-                # 检查文件是否存在
+                # 先保存当前便签
+                self.save_note()
+                
+                # 移动到回收站
+                if self.manager and hasattr(self.manager, 'trash_manager'):
+                    # 复制note_data
+                    note_data_copy = self.note_data.copy()
+                    
+                    # 移动到回收站
+                    self.manager.trash_manager.move_to_trash(self.note_id, note_data_copy)
+                
+                # 删除便签文件
                 if os.path.exists(self.note_file):
                     # 确保文件未被占用
                     try:
@@ -897,9 +934,8 @@ class StickyNote(QWidget):
                         return
 
                     os.remove(self.note_file)
-                    QMessageBox.information(self, '删除成功', '便签及其文件已被删除。')
-                else:
-                    QMessageBox.warning(self, '删除失败', '便签文件不存在。')
+                
+                QMessageBox.information(self, '删除成功', '便签已移动到回收站。')
 
                 if self.manager:
                     self.manager.remove_note(self.note_id)

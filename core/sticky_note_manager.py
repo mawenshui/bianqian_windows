@@ -24,6 +24,9 @@ from features.search import SearchManager
 from features.shortcuts import ShortcutManager
 from features.backup import BackupManager
 from features.positioning import get_position_manager
+from features.export_import import ExportImportManager
+from features.trash import TrashManager
+from features.version_history import VersionHistoryManager
 from core.sticky_note import StickyNote
 
 class SettingsDialog(QDialog):
@@ -423,6 +426,9 @@ class StickyNoteManager:
         self.search_manager = SearchManager(self)
         self.shortcut_manager = ShortcutManager()
         self.backup_manager = BackupManager(self)
+        self.export_import_manager = ExportImportManager(self)
+        self.trash_manager = TrashManager(self)
+        self.version_history_manager = VersionHistoryManager(self)
         self.position_manager = get_position_manager()
         
         # 初始化标签管理
@@ -497,6 +503,18 @@ class StickyNoteManager:
         """
         self.backup_manager.show_backup_dialog()
     
+    def show_export_dialog(self):
+        """显示导出对话框"""
+        self.export_import_manager.show_export_dialog()
+    
+    def show_import_dialog(self):
+        """显示导入对话框"""
+        self.export_import_manager.show_import_dialog()
+    
+    def show_trash_dialog(self):
+        """显示回收站对话框"""
+        self.trash_manager.show_trash_dialog()
+    
     def handle_shortcut_activated(self, action_name):
         """
         处理快捷键激活事件
@@ -536,6 +554,21 @@ class StickyNoteManager:
         backup_action = QAction("备份管理 (Ctrl+Shift+B)", self.app)
         backup_action.triggered.connect(self.show_backup_dialog)
         self.tray_menu.addAction(backup_action)
+
+        # 添加导出选项
+        export_action = QAction("导出便签", self.app)
+        export_action.triggered.connect(self.show_export_dialog)
+        self.tray_menu.addAction(export_action)
+
+        # 添加导入选项
+        import_action = QAction("导入便签", self.app)
+        import_action.triggered.connect(self.show_import_dialog)
+        self.tray_menu.addAction(import_action)
+
+        # 添加回收站选项
+        trash_action = QAction("回收站", self.app)
+        trash_action.triggered.connect(self.show_trash_dialog)
+        self.tray_menu.addAction(trash_action)
 
         # 分割线
         self.tray_menu.addSeparator()
