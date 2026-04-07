@@ -1158,26 +1158,18 @@ class StickyNote(QWidget):
         """显示标签管理对话框"""
         dialog = QDialog(self)
         dialog.setWindowTitle('标签管理')
-        dialog.setFixedSize(400, 300)
+        dialog.setFixedSize(450, 350)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
         
         layout = QVBoxLayout()
         
         # 标签列表
         self.tag_list = QListWidget()
+        self.tag_list.itemDoubleClicked.connect(partial(self.edit_tag_color, dialog))
         layout.addWidget(self.tag_list)
         
         # 加载所有标签
-        if self.manager and hasattr(self.manager, 'tag_manager'):
-            all_tags = self.manager.tag_manager.get_all_tags()
-            for tag in all_tags:
-                item = QListWidgetItem(tag)
-                # 如果标签已应用到当前便签，设置为选中状态
-                if tag in self.tags:
-                    item.setCheckState(Qt.Checked)
-                else:
-                    item.setCheckState(Qt.Unchecked)
-                self.tag_list.addItem(item)
+        self._populate_tag_list()
         
         # 按钮布局
         button_layout = QHBoxLayout()
@@ -1186,6 +1178,16 @@ class StickyNote(QWidget):
         new_tag_btn = QPushButton('新建标签')
         new_tag_btn.clicked.connect(partial(self.create_new_tag, dialog))
         button_layout.addWidget(new_tag_btn)
+        
+        # 编辑标签颜色按钮
+        edit_color_btn = QPushButton('编辑颜色')
+        edit_color_btn.clicked.connect(partial(self.edit_selected_tag_color, dialog))
+        button_layout.addWidget(edit_color_btn)
+        
+        # 删除标签按钮
+        delete_tag_btn = QPushButton('删除标签')
+        delete_tag_btn.clicked.connect(partial(self.delete_selected_tag, dialog))
+        button_layout.addWidget(delete_tag_btn)
         
         # 保存按钮
         save_btn = QPushButton('保存')
@@ -1201,6 +1203,23 @@ class StickyNote(QWidget):
         dialog.setLayout(layout)
         dialog.exec_()
     
+    def _populate_tag_list(self):
+        """填充标签列表"""
+        self.tag_list.clear()
+        if self.manager and hasattr(self.manager, 'tag_manager'):
+            all_tags = self.manager.tag_manager.get_all_tags()
+            for tag in all_tags:
+                item = QListWidgetItem(tag)
+                tag_info = self.manager.tag_manager.get_tag_info(tag)
+                if tag_info and 'color' in tag_info:
+                    item.setForeground(QColor(tag_info['color']))
+                # 如果标签已应用到当前便签，设置为选中状态
+                if tag in self.tags:
+                    item.setCheckState(Qt.Checked)
+                else:
+                    item.setCheckState(Qt.Unchecked)
+                self.tag_list.addItem(item)
+    
     def create_new_tag(self, dialog):
         """创建新标签"""
         tag_name, ok = QInputDialog.getText(self, '新建标签', '请输入标签名称:')
@@ -1208,16 +1227,47 @@ class StickyNote(QWidget):
             tag_name = tag_name.strip()
             if self.manager and hasattr(self.manager, 'tag_manager'):
                 self.manager.tag_manager.add_tag(tag_name)
-                # 更新标签列表
-                self.tag_list.clear()
-                all_tags = self.manager.tag_manager.get_all_tags()
-                for tag in all_tags:
-                    item = QListWidgetItem(tag)
-                    if tag in self.tags:
-                        item.setCheckState(Qt.Checked)
-                    else:
-                        item.setCheckState(Qt.Unchecked)
-                    self.tag_list.addItem(item)
+                
+                # 询问标签颜色
+                color = QColorDialog.getColor(QColor('#3498db'), self, '选择标签颜色')
+                if color.isValid():
+                    self.manager.tag_manager.update_tag_color(tag_name, color.name())
+                
+                self._populate_tag_list()
+    
+    def edit_tag_color(self, item, dialog):
+        """编辑标签颜色"""
+        tag_name = item.text()
+        if self.manager and hasattr(self.manager, 'tag_manager'):
+            tag_info = self.manager.tag_manager.get_tag_info(tag_name)
+            current_color = QColor(tag_info['color']) if tag_info and 'color' in tag_info else QColor('#3498db')
+            
+            color = QColorDialog.getColor(current_color, self, '选择标签颜色')
+            if color.isValid():
+                self.manager.tag_manager.update_tag_color(tag_name, color.name())
+                self._populate_tag_list()
+    
+    def edit_selected_tag_color(self, dialog):
+        """编辑选中标签的颜色"""
+        current_item = self.tag_list.currentItem()
+        if current_item:
+            self.edit_tag_color(current_item, dialog)
+    
+    def delete_selected_tag(self, dialog):
+        """删除选中的标签"""
+        current_item = self.tag_list.currentItem()
+        if current_item:
+            tag_name = current_item.text()
+            reply = QMessageBox.question(
+                self,
+                '确认删除',
+                f'确定要删除标签 "{tag_name}" 吗？\n这不会影响已添加该标签的便签。',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes and self.manager and hasattr(self.manager, 'tag_manager'):
+                self.manager.tag_manager.remove_tag(tag_name)
+                self._populate_tag_list()
     
     def save_tags(self, dialog):
         """保存标签选择"""
@@ -1261,19 +1311,56 @@ class StickyNote(QWidget):
         # 添加新标签
         for tag in self.tags:
             tag_label = QLabel(f'#{tag}')
-            tag_label.setStyleSheet('''
-                QLabel {
-                    background-color: #e3f2fd;
-                    color: #1976d2;
+            
+            # 获取标签颜色
+            bg_color = '#e3f2fd'
+            text_color = '#1976d2'
+            if self.manager and hasattr(self.manager, 'tag_manager'):
+                tag_info = self.manager.tag_manager.get_tag_info(tag)
+                if tag_info and 'color' in tag_info:
+                    custom_color = tag_info['color']
+                    # 基于自定义颜色计算互补色作为背景
+                    bg_color = self._get_background_color_for_tag(custom_color)
+                    text_color = custom_color
+            
+            tag_label.setStyleSheet(f'''
+                QLabel {{
+                    background-color: {bg_color};
+                    color: {text_color};
                     padding: 2px 8px;
                     border-radius: 12px;
                     font-size: 10pt;
-                }
+                }}
             ''')
             self.tags_layout.addWidget(tag_label)
         
         # 添加拉伸空间
         self.tags_layout.addStretch()
+    
+    def _get_background_color_for_tag(self, text_color):
+        """根据标签文字颜色获取合适的背景色"""
+        # 将十六进制颜色转换为 RGB
+        if text_color.startswith('#'):
+            text_color = text_color[1:]
+        
+        if len(text_color) == 3:
+            r = int(text_color[0] * 2, 16)
+            g = int(text_color[1] * 2, 16)
+            b = int(text_color[2] * 2, 16)
+        elif len(text_color) == 6:
+            r = int(text_color[0:2], 16)
+            g = int(text_color[2:4], 16)
+            b = int(text_color[4:6], 16)
+        else:
+            return '#e3f2fd'
+        
+        # 计算浅色背景（降低饱和度和增加亮度）
+        # 使用柔和的同色系背景
+        r_bg = min(255, int(r * 0.3 + 200))
+        g_bg = min(255, int(g * 0.3 + 200))
+        b_bg = min(255, int(b * 0.3 + 200))
+        
+        return f'#{r_bg:02x}{g_bg:02x}{b_bg:02x}'
     
     def show_group_manager(self):
         """显示分组管理对话框"""
