@@ -9,7 +9,8 @@ import os
 import json
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, 
-    QListWidgetItem, QPushButton, QLabel, QMessageBox
+    QListWidgetItem, QPushButton, QLabel, QMessageBox, QComboBox,
+    QCheckBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -43,7 +44,7 @@ class SearchDialog(QDialog):
         初始化用户界面
         """
         self.setWindowTitle('搜索便签')
-        self.setFixedSize(500, 400)
+        self.setFixedSize(550, 450)
         
         layout = QVBoxLayout()
         
@@ -55,6 +56,27 @@ class SearchDialog(QDialog):
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
+        
+        # 筛选选项布局
+        filter_layout = QHBoxLayout()
+        
+        # 标签筛选
+        filter_layout.addWidget(QLabel('标签:'))
+        self.tag_combo = QComboBox()
+        self.tag_combo.addItem('全部标签', None)
+        self._populate_tags()
+        self.tag_combo.currentIndexChanged.connect(self.perform_search)
+        filter_layout.addWidget(self.tag_combo)
+        
+        # 分组筛选
+        filter_layout.addWidget(QLabel('分组:'))
+        self.group_combo = QComboBox()
+        self.group_combo.addItem('全部分组', None)
+        self._populate_groups()
+        self.group_combo.currentIndexChanged.connect(self.perform_search)
+        filter_layout.addWidget(self.group_combo)
+        
+        layout.addLayout(filter_layout)
         
         # 搜索输入框
         search_layout = QHBoxLayout()
@@ -100,18 +122,62 @@ class SearchDialog(QDialog):
         # 设置焦点到搜索框
         self.search_input.setFocus()
     
-    def perform_search(self, query):
+    def _populate_tags(self):
+        """填充标签下拉框"""
+        if hasattr(self.manager, 'tag_manager'):
+            all_tags = self.manager.tag_manager.get_all_tags()
+            for tag in all_tags:
+                self.tag_combo.addItem(tag, tag)
+    
+    def _populate_groups(self):
+        """填充分组下拉框"""
+        if hasattr(self.manager, 'group_manager'):
+            all_groups = self.manager.group_manager.get_all_groups()
+            for group in all_groups:
+                self.group_combo.addItem(group, group)
+    
+    def _matches_filter(self, note_data):
         """
-        执行搜索操作
+        检查便签数据是否匹配当前筛选条件
         
         Args:
-            query: 搜索查询字符串
+            note_data: 便签数据字典
+        
+        Returns:
+            bool: 是否匹配筛选条件
+        """
+        # 检查标签筛选
+        selected_tag = self.tag_combo.currentData()
+        if selected_tag is not None:
+            note_tags = note_data.get('tags', [])
+            if selected_tag not in note_tags:
+                return False
+        
+        # 检查分组筛选
+        selected_group = self.group_combo.currentData()
+        if selected_group is not None:
+            note_group = note_data.get('group')
+            if note_group != selected_group:
+                return False
+        
+        return True
+    
+    def perform_search(self):
+        """
+        执行搜索操作
         """
         self.results_list.clear()
         self.search_results = []
         
-        if len(query.strip()) < 1:
-            self.result_label.setText('请输入关键词开始搜索')
+        query = self.search_input.text()
+        
+        # 检查是否有筛选或搜索词
+        has_filter = (self.tag_combo.currentData() is not None or 
+                     self.group_combo.currentData() is not None)
+        has_query = len(query.strip()) >= 1
+        
+        if not has_filter and not has_query:
+            self.result_label.setText('请输入关键词或选择筛选条件开始搜索')
             self.open_button.setEnabled(False)
             return
         
@@ -119,11 +185,20 @@ class SearchDialog(QDialog):
         
         # 搜索已打开的便签
         for note_id, note in self.manager.notes.items():
-            title = note.note_data.get('title', '').lower()
-            content = note.note_data.get('content', '').lower()
+            note_data = note.note_data
             
-            if query_lower in title or query_lower in content:
-                self.search_results.append((note_id, note, True))  # True表示已打开
+            # 先检查筛选条件
+            if not self._matches_filter(note_data):
+                continue
+            
+            # 再检查搜索关键词
+            if has_query:
+                title = note_data.get('title', '').lower()
+                content = note_data.get('content', '').lower()
+                if query_lower not in title and query_lower not in content:
+                    continue
+            
+            self.search_results.append((note_id, note, True))  # True表示已打开
         
         # 搜索未打开的便签文件
         notes_dir = self.manager.notes_dir
@@ -143,11 +218,18 @@ class SearchDialog(QDialog):
                         with open(note_file, 'r', encoding='utf-8') as f:
                             note_data = json.load(f)
                         
-                        title = note_data.get('title', '').lower()
-                        content = note_data.get('content', '').lower()
+                        # 先检查筛选条件
+                        if not self._matches_filter(note_data):
+                            continue
                         
-                        if query_lower in title or query_lower in content:
-                            self.search_results.append((note_id, note_data, False))  # False表示未打开
+                        # 再检查搜索关键词
+                        if has_query:
+                            title = note_data.get('title', '').lower()
+                            content = note_data.get('content', '').lower()
+                            if query_lower not in title and query_lower not in content:
+                                continue
+                        
+                        self.search_results.append((note_id, note_data, False))  # False表示未打开
                     
                     except Exception as e:
                         print(f"搜索便签文件 {filename} 时出错: {e}")
