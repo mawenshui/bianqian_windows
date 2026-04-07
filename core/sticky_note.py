@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QTextEdit, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QMessageBox, QCheckBox,
     QColorDialog, QFrame, QDialog, QLineEdit, QListWidget, QListWidgetItem,
-    QInputDialog
+    QInputDialog, QSystemTrayIcon
 )
 from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QTextCursor, QTextCharFormat, QPainter, QPen

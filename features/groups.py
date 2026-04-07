@@ -135,6 +135,12 @@ class GroupManager:
     
     def get_note_group(self, note_id):
         """获取便签所在的分组"""
+        # 先从内存中的分组数据查找
+        for group_name, group_data in self.groups.items():
+            if note_id in group_data['note_ids']:
+                return group_name
+        
+        # 如果内存中没有，再从文件中查找
         note_file = os.path.join(self.manager.notes_dir, f'note_{note_id}.json')
         if os.path.exists(note_file):
             try:
