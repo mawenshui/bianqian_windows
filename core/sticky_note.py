@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QInputDialog
 )
 from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QSize
-from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QTextCursor
+from PyQt5.QtGui import QFont, QColor, QPalette, QCursor, QTextCursor, QTextCharFormat
 
 # 导入新功能模块
 from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit
