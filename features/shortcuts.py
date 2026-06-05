@@ -7,13 +7,63 @@
 
 import sys
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QAbstractNativeEventFilter
 from PyQt5.QtGui import QKeySequence
+
+# WM_HOTKEY 消息常量
+WM_HOTKEY = 0x0312
+
+# 用于通过 ctypes 获取 Win32 消息的替代方案
+import ctypes
+from ctypes import wintypes
+
+user32 = ctypes.windll.user32
+
+
+class HotkeyNativeEventFilter(QAbstractNativeEventFilter):
+    """
+    Windows 原生消息过滤器
+    
+    拦截 WM_HOTKEY 消息并转发到 GlobalShortcutManager
+    """
+    
+    def __init__(self, shortcut_manager):
+        super().__init__()
+        self.shortcut_manager = shortcut_manager
+    
+    def nativeEventFilter(self, event_type, message):
+        """
+        处理原生 Windows 消息
+        
+        Args:
+            event_type: 事件类型 (QByteArray)
+            message: MSG 结构指针
+            
+        Returns:
+            tuple: (bool, int) — (是否处理, 返回值)
+        """
+        try:
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+            if msg.message == WM_HOTKEY:
+                hotkey_id = msg.wParam
+                self.shortcut_manager.handle_hotkey_message(hotkey_id)
+                return True, 0
+        except KeyboardInterrupt:
+            # Ctrl+C 强制退出时，触发应用优雅关闭
+            app = QApplication.instance()
+            if app:
+                app.quit()
+            return False, 0
+        except Exception as e:
+            print(f"处理原生事件时出错: {e}")
+        
+        return False, 0
 
 try:
     import win32api
     import win32con
     import win32gui
+    import pywintypes
     from win32gui import RegisterHotKey, UnregisterHotKey
     WINDOWS_AVAILABLE = True
 except ImportError:
@@ -21,6 +71,7 @@ except ImportError:
     print("Windows API不可用，全局快捷键功能将被禁用")
     RegisterHotKey = None
     UnregisterHotKey = None
+    pywintypes = None
 
 
 class GlobalShortcutManager(QObject):
@@ -42,11 +93,29 @@ class GlobalShortcutManager(QObject):
         super().__init__(parent)
         self.shortcuts = {}  # 存储注册的快捷键
         self.hotkey_id = 1  # 热键ID计数器
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.check_messages)
+        self.native_filter = None  # 原生消息过滤器
         
         if WINDOWS_AVAILABLE:
-            self.timer.start(50)  # 每50ms检查一次消息
+            # 安装原生消息过滤器来捕获 WM_HOTKEY 消息
+            self.native_filter = HotkeyNativeEventFilter(self)
+            app = QApplication.instance()
+            if app:
+                app.installNativeEventFilter(self.native_filter)
+                print("已安装全局快捷键消息过滤器")
+    
+    def handle_hotkey_message(self, hotkey_id):
+        """
+        处理热键消息（由 HotkeyNativeEventFilter 调用）
+        
+        Args:
+            hotkey_id: 热键 ID
+        """
+        if hotkey_id in self.shortcuts:
+            action_name = self.shortcuts[hotkey_id]['action']
+            print(f"全局快捷键触发: {self.shortcuts[hotkey_id]['combination']} -> {action_name}")
+            self.shortcut_activated.emit(action_name)
+        else:
+            print(f"收到未知热键ID: {hotkey_id}")
     
     def register_shortcut(self, key_combination, action_name):
         """
@@ -72,10 +141,15 @@ class GlobalShortcutManager(QObject):
                 return False
             
             # 注册热键 - 使用NULL窗口句柄
-            success = RegisterHotKey(
-                None, self.hotkey_id, modifiers, key_code
-            )
-            
+            try:
+                success = RegisterHotKey(
+                    None, self.hotkey_id, modifiers, key_code
+                )
+            except pywintypes.error as e:
+                # 热键已被其他程序占用（常见于旧实例仍在托盘运行）
+                print(f"⚠ 快捷键 '{key_combination}' 无法注册 — 可能已被其他程序占用，应用将不依赖此快捷键运行")
+                return False
+
             if success:
                 self.shortcuts[self.hotkey_id] = {
                     'combination': key_combination,
@@ -204,28 +278,23 @@ class GlobalShortcutManager(QObject):
         
         return key_map.get(key.lower())
     
-    def check_messages(self):
-        """
-        检查Windows消息队列中的热键消息
-        """
-        if not WINDOWS_AVAILABLE:
-            return
-        
-        try:
-            # 这里应该检查WM_HOTKEY消息
-            # 由于PyQt5的限制，我们使用一个简化的实现
-            pass
-        except Exception as e:
-            print(f"检查消息时出错: {e}")
-    
     def cleanup(self):
         """
-        清理所有注册的快捷键
+        清理所有注册的快捷键和资源
         """
         if not WINDOWS_AVAILABLE:
             return
         
         try:
+            # 卸载原生消息过滤器
+            if self.native_filter:
+                app = QApplication.instance()
+                if app:
+                    app.removeNativeEventFilter(self.native_filter)
+                    print("已卸载全局快捷键消息过滤器")
+                self.native_filter = None
+            
+            # 注销所有热键
             for hotkey_id in list(self.shortcuts.keys()):
                 UnregisterHotKey(None, hotkey_id)
             

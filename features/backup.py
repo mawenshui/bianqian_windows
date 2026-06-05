@@ -18,6 +18,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 
+from core import get_styles_dir, get_user_data_dir
+
 
 class BackupWorker(QThread):
     """
@@ -469,7 +471,7 @@ class BackupManager:
             manager: 便签管理器实例
         """
         self.manager = manager
-        self.backup_dir = os.path.join(os.getcwd(), 'backups')
+        self.backup_dir = os.path.join(get_user_data_dir(), 'backups')
         os.makedirs(self.backup_dir, exist_ok=True)
         
         # 备份设置
@@ -533,7 +535,7 @@ class BackupManager:
                 if os.path.exists(settings_file):
                     total_files += 1
                 
-                styles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'styles')
+                styles_dir = get_styles_dir()
                 if os.path.exists(styles_dir):
                     for filename in os.listdir(styles_dir):
                         if filename.endswith('.css'):
@@ -623,7 +625,7 @@ class BackupManager:
             
             # 恢复主题文件
             temp_styles_dir = os.path.join(temp_dir, 'styles')
-            styles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'styles')
+            styles_dir = get_styles_dir()
             if os.path.exists(temp_styles_dir):
                 if not os.path.exists(styles_dir):
                     os.makedirs(styles_dir)

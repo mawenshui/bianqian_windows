@@ -1,0 +1,25 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 构建产物（EXE/MSI 通过 GitHub Release 发布）
+build/
+
+# 用户运行时数据（不在版本管理中）
+notes/
+backups/
+settings.json
+window_positions.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# cx_Freeze 构建临时目录
+dist/
+
+# PyInstaller
+*.spec

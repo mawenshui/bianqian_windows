@@ -10,9 +10,9 @@
 - **GUI框架**: PyQt5
 - **目标平台**: Windows 10+
 - **开发者**: MaWenshui
-- **当前版本**: 1.2.0
-- **最后更新**: 2025年6月
-- **主要特性**: 富文本编辑、多主题支持、智能定位、数据备份
+- **当前版本**: 1.3.1
+- **最后更新**: 2026年6月
+- **主要特性**: 富文本编辑、多主题支持、智能定位、数据备份、定时提醒、标签管理、导入导出、模板系统、右键菜单、窗口吸附、动画效果、异步I/O
 
 ---
 
@@ -23,24 +23,36 @@
 bianqian_windows/
 ├── main.py                 # 主程序入口文件
 ├── settings.json           # 应用配置文件
+├── tags.json               # 标签数据文件 (v1.2.0)
 ├── window_positions.json   # 窗口位置记录文件
 ├── readme.md              # 用户使用手册
 ├── PROJECT_SPECIFICATION.md # 项目规范文档（本文件）
 ├── IMPROVEMENT_PLAN.md    # 项目改进计划文档
-├── core/                  # 核心模块目录
-│   └── __init__.py
-├── features/              # 功能模块目录 (Version 1.1.0新增)
+├── core/                  # 核心模块目录 (v1.3.0 拆分)
+│   ├── __init__.py        # 模块导出，版本号
+│   ├── note.py            # 便签窗口组件 + 异步I/O Worker
+│   ├── manager.py         # 应用管理器 (StickyNoteManager)
+│   └── settings.py        # 设置对话框 (SettingsDialog)
+├── features/              # 功能模块目录 (v1.1.0新增)
 │   ├── __init__.py
-│   ├── search.py         # 搜索功能模块
-│   ├── undo_redo.py      # 撤销/重做功能模块
-│   ├── shortcuts.py      # 全局快捷键模块
-│   ├── positioning.py    # 智能窗口定位模块
-│   └── backup.py         # 数据备份模块
+│   ├── search.py          # 搜索功能模块
+│   ├── backup.py          # 数据备份模块
+│   ├── shortcuts.py       # 全局快捷键模块
+│   ├── positioning.py     # 智能窗口定位模块
+│   ├── undo_redo.py       # 撤销/重做功能模块
+│   ├── formatter.py       # 智能格式化模块 (v1.2.0)
+│   ├── reminder.py        # 定时提醒模块 (v1.2.0)
+│   ├── tag.py             # 标签管理模块 (v1.2.0)
+│   ├── import_export.py   # 导入导出模块 (v1.2.0)
+│   └── template.py        # 便签模板模块 (v1.2.0)
 ├── notes/                 # 便签数据存储目录（运行时创建）
 │   ├── note_1.json       # 便签数据文件
 │   ├── note_2.json
 │   └── ...
-├── backups/               # 备份文件存储目录 (Version 1.1.0新增)
+├── backups/               # 备份文件存储目录 (v1.1.0)
+│   ├── backup_settings.json
+│   └── ...
+├── templates/             # 自定义模板存储 (v1.2.0)
 │   └── ...
 └── styles/                # 主题样式文件目录
     ├── classic_white.css
@@ -59,29 +71,38 @@ bianqian_windows/
 
 ### 核心模块架构
 
-#### 1. 主程序模块 (main.py)
-- **StickyNoteManager**: 应用程序管理器类
-- **StickyNote**: 便签窗口类
-- **SettingsDialog**: 设置对话框类
-- **UndoRedoLineEdit**: 支持撤销/重做的单行编辑器 (继承自PlainLineEdit)
-- **UndoRedoTextEdit**: 支持撤销/重做的文本编辑器 (继承自PlainTextEdit)
+#### 1. 核心模块 (core/) - v1.3.0 从 main.py 拆分
+- **StickyNoteManager** (manager.py): 应用管理器，中央控制器
+- **StickyNote** (note.py): 便签窗口组件，含右键菜单/吸附/动画
+- **PlainLineEdit** (note.py): 纯文本标题编辑器
+- **PlainTextEdit** (note.py): 纯文本内容编辑器
+- **NoteSaveWorker** (note.py): 异步保存后台线程
+- **NoteLoadWorker** (note.py): 异步加载后台线程
+- **SettingsDialog** (settings.py): 主题+字体设置对话框
 
-#### 2. 功能模块 (features/) - Version 1.1.0新增
-- **SearchManager**: 便签搜索功能管理器
-- **ShortcutManager**: 全局快捷键管理器
-- **BackupManager**: 数据备份管理器
-- **WindowPositionManager**: 智能窗口定位管理器
-- **UndoRedoLineEdit/TextEdit**: 撤销/重做功能组件
+#### 2. 功能模块 (features/) - v1.1.0 扩展至 v1.2.0
+- **SearchManager / SearchDialog**: 便签搜索功能 (search.py)
+- **ShortcutManager**: 全局快捷键管理 (shortcuts.py)
+- **BackupManager / BackupDialog**: 数据备份管理 (backup.py)
+- **WindowPositionManager**: 智能窗口定位 (positioning.py)
+- **UndoRedoManager / UndoRedoTextEdit / UndoRedoLineEdit**: 撤销重做 (undo_redo.py)
+- **ContentFormatter**: 智能格式化粘贴 (formatter.py) — v1.2.0
+- **ReminderManager / ReminderDialog / ReminderData**: 定时提醒 (reminder.py) — v1.2.0
+- **TagManager / TagEditDialog / NoteTagSelector**: 标签管理 (tag.py) — v1.2.0
+- **ImportExportDialog / ExportWorker**: 导入导出 (import_export.py) — v1.2.0
+- **TemplateManager / TemplateDialog**: 模板系统 (template.py) — v1.2.0
 
 #### 3. 数据存储模块
 - **便签数据**: JSON格式存储在 `notes/` 目录
 - **应用设置**: JSON格式存储在 `settings.json`
+- **标签数据**: JSON格式存储在 `tags.json` — v1.2.0
 - **窗口位置**: JSON格式存储在 `window_positions.json`
 - **备份数据**: 存储在 `backups/` 目录
+- **自定义模板**: JSON格式存储在 `templates/` 目录 — v1.2.0
 
 #### 4. 主题系统模块
-- **CSS样式文件**: 存储在 `styles/` 目录
-- **主题管理**: 动态加载和应用主题
+- **CSS样式文件**: 存储在 `styles/` 目录（10种主题）
+- **主题管理**: 动态加载和应用主题，支持暗色/亮色自适应控件样式
 
 ---
 
@@ -125,16 +146,28 @@ bianqian_windows/
         "italic": false
     },
     "font_color": "#000000",
-    "auto_format_enabled": true
+    "auto_format_enabled": true,
+    "tags": ["工作", "重要"],
+    "reminder": {
+        "enabled": true,
+        "datetime": "2025-06-05T09:00",
+        "repeat": "daily",
+        "message": "提醒消息",
+        "last_triggered": "2025-06-04"
+    },
+    "template": "todo"
 }
 ```
 
 #### 字段说明
-- **content**: 便签主要内容，Version 1.2.0起支持HTML格式存储
+- **content**: 便签主要内容，v1.2.0起支持HTML格式存储
 - **plain_content**: 纯文本内容备份，用于搜索和向下兼容
 - **font_color**: 字体颜色设置，十六进制颜色代码
 - **font_settings**: 字体相关设置，包括字体族、大小、加粗、斜体状态
 - **auto_format_enabled**: 自动格式化开关状态
+- **tags**: 标签列表 (v1.2.0 新增)
+- **reminder**: 提醒设置 (v1.2.0 新增)，包含 enabled/datetime/repeat/message/last_triggered
+- **template**: 创建时使用的模板标识 (v1.2.0 新增)
 
 ### 2. 系统托盘模块
 
@@ -146,13 +179,18 @@ bianqian_windows/
 - 双击打开便签
 
 #### 菜单结构
-- 添加便签
-- 搜索便签 (Ctrl+Shift+F) - Version 1.1.0新增
-- 备份管理 (Ctrl+Shift+B) - Version 1.1.0新增
+- 添加便签 (Ctrl+Shift+N)
+- 从模板创建...
+- 搜索便签 (Ctrl+Shift+F)
+- 备份管理 (Ctrl+Shift+B)
+- 导入导出
+- ─────────
 - 便签列表（子菜单）
-  - 便签标题
-    - 打开
-    - 删除
+  - 便签标题 → 打开 / 删除
+- 标签分组（子菜单）
+  - 标签名 → 该标签下的便签列表
+- 管理标签
+- ─────────
 - 开机自启
 - 设置
 - 退出
@@ -263,7 +301,141 @@ StickyNote {
 #### 快捷键
 - **Ctrl+Shift+B**: 打开备份管理对话框
 
-### 9. 设置管理模块
+### 9. 定时提醒模块 - Version 1.2.0新增
+
+#### 功能特性
+- 一次性提醒（指定日期时间）
+- 周期提醒（每天/每周/每月）
+- 到期时系统托盘通知（5秒弹出）
+- 提醒数据持久化到便签 JSON 中
+- 防重复触发（last_triggered 日期跟踪）
+- 提醒按钮状态可视化
+
+#### 核心类
+- **ReminderManager**: 提醒管理器，每30秒轮询检查
+- **ReminderDialog**: 提醒设置对话框
+- **ReminderData**: 提醒数据模型（含 is_due/mark_triggered）
+- **RepeatMode**: 重复模式枚举 (once/daily/weekly/monthly)
+
+### 10. 标签管理模块 - Version 1.2.0新增
+
+#### 功能特性
+- 标签 CRUD（创建、重命名、删除）
+- 标签颜色自定义（12种预设色 + 颜色选择器）
+- 便签多标签关联
+- 托盘菜单按标签分组显示
+- 标签芯片组件（便签上显示，点击×移除）
+- 标签数据持久化到 tags.json
+
+#### 核心类
+- **TagManager**: 标签管理器
+- **TagEditDialog**: 标签编辑对话框
+- **NoteTagSelector**: 便签标签选择器
+- **TagChipWidget**: 标签芯片组件
+
+#### 预设颜色
+12种预设标签颜色: #e74c3c, #e67e22, #f1c40f, #2ecc71, #3498db, #9b59b6, #1abc9c, #34495e, #e91e63, #00bcd4, #ff5722, #607d8b
+
+### 11. 导入导出模块 - Version 1.2.0新增
+
+#### 功能特性
+- 单便签导出为 TXT / Markdown
+- 批量导出所有便签为 ZIP 压缩包
+- 从 TXT 文件导入创建便签
+- 多文件批量导入
+- 后台线程异步导出（不阻塞UI）
+- 导出进度条显示
+
+#### 核心类
+- **ImportExportDialog**: 导入导出对话框
+- **ExportWorker**: 导出工作线程 (QThread)
+
+### 12. 模板系统模块 - Version 1.2.0新增
+
+#### 功能特性
+- 5个内置模板：待办清单、会议纪要、周计划、每日日志、头脑风暴
+- 用户自定义模板（保存到 templates/ 目录）
+- 模板预览和编辑
+- {date} 占位符自动替换为当前日期
+- 从模板快速创建便签
+- 内置模板不可删除
+
+#### 核心类
+- **TemplateManager**: 模板管理器
+- **TemplateDialog**: 模板选择和编辑对话框
+
+#### 内置模板
+| 标识 | 名称 | 图标 |
+|------|------|------|
+| todo | 待办清单 | ✅ |
+| meeting | 会议纪要 | 📋 |
+| weekplan | 周计划 | 📅 |
+| daily | 每日日志 | 📝 |
+| brainstorm | 头脑风暴 | 💡 |
+
+### 13. 智能格式化模块 - Version 1.2.0新增
+
+#### 功能特性
+- 粘贴时自动识别内容类型
+- 支持 8 种格式：JSON、HTML、Markdown、XML、CSS、JavaScript、Python、SQL
+- 可开关的自动格式化（每个便签独立设置）
+- JSON 自动美化格式化
+
+#### 核心类
+- **ContentFormatter**: 内容格式化器
+- **SmartTextEdit**: 智能文本编辑器（备用）
+
+### 14. 右键上下文菜单 - Version 1.3.0新增
+
+#### 功能特性
+- 复制全部内容 / 粘贴
+- 切换主题（子菜单，当前主题已勾选）
+- 字体设置（增大/减小字体）
+- 总在最前开关
+- 透明度选择（QActionGroup 互斥，8档: 30%~100%）
+- 设置标签 / 设置提醒
+- 隐藏便签 / 删除便签
+
+#### 实现
+- `StickyNote.contextMenuEvent()` 方法 (约100行)
+
+### 15. 窗口吸附 - Version 1.3.0新增
+
+#### 功能特性
+- 屏幕边缘吸附（上下左右四边，阈值15px）
+- 便签间边缘对齐（左贴右、右贴左、上贴下、下贴上、边缘对齐）
+- 拖拽释放时自动触发
+
+#### 实现
+- `StickyNote._apply_snapping()` / `StickyNote._snap_to_window()` 方法
+- 常量 `SNAP_THRESHOLD = 15`
+
+### 16. 淡入淡出动画 - Version 1.3.0新增
+
+#### 功能特性
+- 窗口显示时 200ms 淡入 (OutCubic 缓动)
+- 窗口隐藏时 150ms 淡出 (InCubic 缓动)
+- 隐藏后恢复原始透明度
+
+#### 实现
+- `StickyNote.showEvent()` 重写
+- `StickyNote._fade_out_and_hide()` / `StickyNote._on_fade_out_finished()` 方法
+- 使用 `QPropertyAnimation(windowOpacity)`
+
+### 17. 异步 I/O - Version 1.3.0新增
+
+#### 功能特性
+- 保存异步化：NoteSaveWorker 后台线程 + 500ms 防抖
+- 加载异步化：NoteLoadWorker 后台线程 + preloaded_data 参数跳过重复读取
+- 加载进度追踪：_pending_loaders / _loaded_note_count
+
+#### 核心类
+- **NoteSaveWorker** (note.py): 异步保存工作线程
+- **NoteLoadWorker** (note.py): 异步加载工作线程
+  - `loaded(note_id, data)` 信号
+  - `failed(note_id, error)` 信号
+
+### 18. 设置管理模块
 
 #### 功能特性
 - 默认主题设置
@@ -683,21 +855,45 @@ except Exception as e:
 
 ### 2. 更新日志
 
+#### Version 1.3.1 (2026年06月)
+**Bug 修复**:
+- ✅ toggle_always_on_top 复选框状态同步修复
+- ✅ 透明度菜单 QActionGroup 互斥修复
+
+**文档更新**:
+- ✅ 更新 PROJECT_SPECIFICATION.md 至 v1.3.1
+- ✅ 更新 readme.md 功能特性和快捷键
+- ✅ 更新 IMPROVEMENT_PLAN.md 标记完成状态
+
+#### Version 1.3.0 (2026年06月)
+**新增功能**:
+- ✅ 右键上下文菜单 (复制粘贴/主题/字体/置顶/透明度/标签/提醒)
+- ✅ 窗口吸附 (屏幕边缘 + 便签间边缘对齐)
+- ✅ 淡入淡出动画 (200ms淡入/150ms淡出)
+
+**性能优化**:
+- ✅ 异步I/O保存 (NoteSaveWorker 后台线程)
+- ✅ 异步I/O加载 (NoteLoadWorker 后台线程)
+- ✅ 保存防抖 (500ms 延迟)
+- ✅ 核心模块拆分 (main.py → core/note.py + core/manager.py + core/settings.py)
+
 #### Version 1.2.0 (2025年06月)
 **新增功能**:
+- ✅ 定时提醒系统 (一次性/每天/每周/每月，系统托盘通知)
+- ✅ 标签管理 (CRUD/颜色/分组/芯片组件)
+- ✅ 导入导出 (TXT/Markdown/ZIP)
+- ✅ 模板系统 (5个内置模板 + 自定义)
+- ✅ 智能格式化粘贴 (JSON/HTML/Markdown等8种格式)
 - ✅ 富文本格式工具栏 (加粗、斜体、字体颜色)
 - ✅ 选择性文本格式应用
 - ✅ 字体颜色自定义选择
-- ✅ 格式按钮状态可视化
 - ✅ HTML格式便签内容存储
 - ✅ 纯文本内容备份机制
 
 **功能增强**:
 - ✅ 字体大小调整功能修复 (A+/A-按钮)
 - ✅ 标题栏高度自适应调整
-- ✅ 富文本编辑体验优化
-- ✅ 格式设置自动保存
-- ✅ 向下兼容旧版本便签
+- ✅ 托盘菜单扩展 (标签分组/导入导出/从模板创建)
 
 **技术改进**:
 - ✅ QTextCharFormat富文本格式支持
@@ -709,7 +905,7 @@ except Exception as e:
 **新增功能**:
 - ✅ 便签搜索功能 (Ctrl+Shift+F)
 - ✅ 撤销/重做操作支持 (Ctrl+Z/Ctrl+Y)
-- ✅ 全局快捷键系统
+- ✅ 全局快捷键系统 (Ctrl+Shift+N/F/B)
 - ✅ 智能窗口定位
 - ✅ 数据备份管理 (Ctrl+Shift+B)
 
@@ -717,14 +913,6 @@ except Exception as e:
 - ✅ 新增 features/ 模块化架构
 - ✅ 功能管理器模式实现
 - ✅ 增强的编辑器组件
-
-**用户体验优化**:
-- ✅ 托盘菜单功能扩展
-- ✅ 快捷键操作支持
-- ✅ 智能窗口布局
-- ✅ 操作反馈改进
-- ❌ 主题预览功能 (待实现)
-- ❌ 字体选择扩展 (待实现)
 
 #### Version 1.0.0 (2024年11月)
 **基础功能**:
@@ -842,33 +1030,50 @@ class NewFeatureManager:
 
 ## 总结
 
-本项目规范文档为 StickyNote 项目的开发、维护和扩展提供了全面的指导。Version 1.1.0 引入了模块化架构和多项核心功能，显著提升了应用的实用性和用户体验。开发者应严格遵循本规范，确保代码质量、项目稳定性和用户体验。随着项目的发展，本规范也将持续更新和完善。
+本项目规范文档为 StickyNote 项目的开发、维护和扩展提供了全面的指导。从 v1.0.0 到 v1.3.1，项目经历了模块化架构重构、功能扩展、性能优化三个主要阶段，现已拥有 16 个 Python 模块、10 种主题样式、10 个功能子系统的完善桌面便签应用。
 
-### Version 1.1.0 主要成就
-- ✅ **模块化架构**: 引入 features/ 目录，实现功能模块化管理
-- ✅ **搜索功能**: 快速查找便签，提升使用效率
-- ✅ **撤销/重做**: 标准编辑操作支持，提升编辑体验
-- ✅ **全局快捷键**: 系统级快捷键支持，便捷操作
-- ✅ **智能定位**: 避免窗口重叠，优化布局体验
-- ✅ **数据备份**: 保障数据安全，支持恢复功能
+### 各版本主要成就
 
-### Version 1.2.0 主要成就
-- ✅ **富文本格式工具栏**: 新增加粗、斜体、字体颜色按钮，提供直观的格式控制
-- ✅ **选择性格式应用**: 支持对选中文本应用格式，实现精确的格式控制
-- ✅ **按钮状态可视化**: 格式按钮具有选中效果，当前格式状态一目了然
-- ✅ **HTML格式存储**: 便签内容以HTML格式保存，完整保留格式信息
-- ✅ **纯文本备份机制**: 同时保存纯文本版本，确保向下兼容和搜索功能
-- ✅ **字体大小调整修复**: 修复A+/A-按钮功能，支持动态字体调整
-- ✅ **标题栏高度自适应**: 标题栏高度根据字体大小动态调整，优化显示效果
-- ✅ **富文本编辑增强**: 全面提升文本编辑体验，支持多种格式组合应用
-- ✅ **格式状态同步**: 实现按钮状态与文本格式的实时同步显示
-- ✅ **主题系统兼容**: 富文本格式与现有主题系统完全兼容
+#### v1.1.0 — 模块化架构
+- ✅ features/ 目录引入，功能模块化管理
+- ✅ 搜索功能、撤销/重做、全局快捷键、智能定位、数据备份
+
+#### v1.2.0 — 高级功能
+- ✅ 定时提醒、标签管理、导入导出、模板系统、智能格式化
+- ✅ 富文本格式工具栏（加粗/斜体/字体颜色）
+
+#### v1.3.0 / v1.3.1 — UI/性能
+- ✅ 右键上下文菜单、窗口吸附、淡入淡出动画
+- ✅ 异步I/O加载/保存、核心模块拆分 (core/)
+- ✅ Bug修复：复选框状态同步、透明度菜单互斥
 
 ### 技术架构优势
-- **可扩展性**: 模块化设计便于功能扩展
-- **可维护性**: 清晰的代码结构和规范
-- **用户体验**: 现代化的交互设计
+- **模块化**: core/ + features/ 双层架构，16个模块分工明确
+- **可扩展性**: 功能管理器模式，新增功能只需添加 features/ 模块
+- **可维护性**: 清晰的代码结构和命名规范
+- **性能**: 异步I/O + 防抖保存，UI主线程不阻塞
+- **用户体验**: 动画效果、窗口吸附、右键菜单、多主题
 - **稳定性**: 完善的错误处理和数据保护
+
+### 模块清单 (共16个)
+| 模块 | 文件 | 版本 | 职责 |
+|------|------|------|------|
+| 主入口 | main.py | 1.0.0 | 程序入口 |
+| 核心导出 | core/__init__.py | 1.3.1 | 版本管理和导出 |
+| 便签组件 | core/note.py | 1.3.1 | 窗口UI/动画/吸附/I/O |
+| 应用管理 | core/manager.py | 1.3.0 | 生命周期/托盘/集成 |
+| 设置对话框 | core/settings.py | 1.3.0 | 主题和字体设置 |
+| 搜索 | features/search.py | 1.1.0 | 全文搜索 |
+| 备份 | features/backup.py | 1.1.0 | 自动/手动备份 |
+| 快捷键 | features/shortcuts.py | 1.1.0 | 全局热键 |
+| 定位 | features/positioning.py | 1.1.0 | 智能窗口布局 |
+| 撤销重做 | features/undo_redo.py | 1.1.0 | Ctrl+Z/Y |
+| 格式化 | features/formatter.py | 1.2.0 | 智能粘贴 |
+| 提醒 | features/reminder.py | 1.2.0 | 定时通知 |
+| 标签 | features/tag.py | 1.2.0 | 分类管理 |
+| 导入导出 | features/import_export.py | 1.2.0 | TXT/MD/ZIP |
+| 模板 | features/template.py | 1.2.0 | 快速创建 |
+| 功能导出 | features/__init__.py | 1.1.0 | 模块元信息 |
 
 ### 联系信息
 - **开发者**: MaWenshui
@@ -877,7 +1082,7 @@ class NewFeatureManager:
 
 ---
 
-*最后更新时间: 2025年6月*
-*文档版本: 1.2.0*
-*对应软件版本: StickyNote 1.2.0*
-*更新内容: 新增富文本格式功能模块，完善数据结构说明，更新版本日志*
+*最后更新时间: 2026年6月*
+*文档版本: 1.3.1*
+*对应软件版本: StickyNote 1.3.1*
+*更新内容: 新增 v1.2.0 ~ v1.3.1 全部功能模块文档，完善版本日志和模块清单*

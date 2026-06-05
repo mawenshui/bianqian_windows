@@ -367,12 +367,20 @@ class WindowPositionManager:
         加载位置历史
         
         Returns:
-            dict: 位置历史数据
+            dict: 位置历史数据 (key 为 int 类型的 note_id)
         """
         if os.path.exists(self.position_history_file):
             try:
                 with open(self.position_history_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    raw_data = json.load(f)
+                # JSON key 都是字符串，转换为 int 以保持与 note_id 类型一致
+                result = {}
+                for k, v in raw_data.items():
+                    try:
+                        result[int(k)] = v
+                    except (ValueError, TypeError):
+                        result[k] = v
+                return result
             except Exception as e:
                 print(f"加载位置历史时出错: {e}")
         
@@ -383,8 +391,10 @@ class WindowPositionManager:
         保存位置历史
         """
         try:
+            # 确保 key 为字符串以避免 JSON 序列化时出现重复 key
+            str_keyed = {str(k): v for k, v in self.position_history.items()}
             with open(self.position_history_file, 'w', encoding='utf-8') as f:
-                json.dump(self.position_history, f, ensure_ascii=False, indent=4)
+                json.dump(str_keyed, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存位置历史时出错: {e}")
     
