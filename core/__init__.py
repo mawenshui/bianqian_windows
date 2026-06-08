@@ -46,7 +46,7 @@ def get_user_data_dir():
         return os.getcwd()
 
 
-__version__ = '1.5.4'
+__version__ = '1.5.5'
 __author__ = 'MaWenshui'
 
 from core.note import StickyNote, PlainLineEdit, PlainTextEdit, NoteSaveWorker, NoteLoadWorker, RESIZE_MARGIN

@@ -42,7 +42,7 @@ bdist_msi_options = {
     'initial_target_dir': r'[ProgramFilesFolder]',
     'summary_data': {
         'author': 'MaWenshui',
-        'comments': '桌面便签应用',
+        'comments': '桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
         'keywords': 'sticky,note,便签,桌面',
     },
     'install_icon': os.path.join(project_dir, 'icon.png') if os.path.exists(os.path.join(project_dir, 'icon.png')) else None,
@@ -50,6 +50,32 @@ bdist_msi_options = {
     'launch_on_finish': True,
     # 自定义 MSI 表数据
     'data': {
+        # --- 桌面快捷方式 Property（默认勾选）---
+        'Property': [
+            ('DESKTOPSHORTCUT', '1'),
+        ],
+
+        # --- 中文化按钮文本（通过 UIText 覆写）---
+        'UIText': [
+            ('ButtonText_Back',   '上一步(&B)'),
+            ('ButtonText_Browse', '浏览(&R)...'),
+            ('ButtonText_Cancel', '取消'),
+            ('ButtonText_Exit',   '退出'),
+            ('ButtonText_Finish', '完成(&F)'),
+            ('ButtonText_Ignore', '忽略(&I)'),
+            ('ButtonText_Install','安装(&I)'),
+            ('ButtonText_Next',   '下一步(&N)'),
+            ('ButtonText_No',     '否(&N)'),
+            ('ButtonText_OK',     '确定'),
+            ('ButtonText_Remove', '删除(&R)'),
+            ('ButtonText_Repair', '修复(&R)'),
+            ('ButtonText_Retry',  '重试(&R)'),
+            ('ButtonText_Yes',    '是(&Y)'),
+            ('Progress1',         '正在安装'),
+            ('Progress2',         '正在安装'),
+            ('MaintenanceForm_Action', '修复'),
+        ],
+
         # --- 目录自动追加 StickyNote\ 子目录 ---
         'CustomAction': [
             # 类型 51: 将 TARGETDIR 设置为 [TARGETDIR]StickyNote\（追加子目录）
@@ -64,6 +90,31 @@ bdist_msi_options = {
             ('A_APPEND_STICKYNOTE_DIR', 'NOT Installed', 1235),
         ],
 
+        # --- 桌面快捷方式：组件 + 快捷方式 + 功能绑定 ---
+        'Component': [
+            # 条件化组件：仅当 DESKTOPSHORTCUT=1 时安装
+            ('DesktopShortcut', 'DesktopShortcut', 'DesktopFolder', 0, 'DESKTOPSHORTCUT', 'DesktopShortcut'),
+        ],
+        'Shortcut': [
+            # Shortcut, Directory_, Name, Component_, Target, Arguments, Description, Hotkey, Icon_, IconIndex, ShowCmd, WkDir
+            ('DesktopShortcut', 'DesktopFolder', '便签.lnk', 'DesktopShortcut',
+             '[TARGETDIR]StickyNote.exe', '', '桌面便签应用', '', '', '', '', ''),
+        ],
+        'FeatureComponents': [
+            ('default', 'DesktopShortcut'),
+        ],
+
+        # --- ExitDialog 中添加"创建桌面快捷方式"复选框 ---
+        'Control': [
+            # Dialog_, Control, Type, X, Y, Width, Height, Attributes, Property, Text, Control_Next, Help
+            # LaunchOnFinish 在 Y=200，Description 在 Y=235，此处放在中间 Y=220
+            ('ExitDialog', 'DesktopShortcut', 'CheckBox', 15, 220, 300, 20, 3,
+             'DESKTOPSHORTCUT', '创建桌面快捷方式(&D)', '', ''),
+        ],
+        'ControlCondition': [
+            # 修复/卸载时不显示桌面快捷方式复选框
+            ('ExitDialog', 'DesktopShortcut', 'Hide', 'Installed'),
+        ],
     },
 }
 
@@ -79,7 +130,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.5.4',
+    version='1.5.5',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={
