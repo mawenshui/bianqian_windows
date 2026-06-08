@@ -20,13 +20,13 @@ from functools import partial
 from PyQt5.QtWidgets import (
     QApplication, QMessageBox, QMenu, QAction, QSystemTrayIcon
 )
-from PyQt5.QtCore import Qt, QCoreApplication
+from PyQt5.QtCore import Qt, QCoreApplication, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QStyle
 
 from core.note import StickyNote, NoteLoadWorker
 from core.settings import SettingsDialog
-from core import get_project_root, get_styles_dir, get_user_data_dir
+from core import get_project_root, get_styles_dir, get_user_data_dir, __version__
 from features.search import SearchManager
 from features.shortcuts import ShortcutManager
 from features.backup import BackupManager
@@ -35,6 +35,10 @@ from features.reminder import ReminderManager
 from features.tag import TagManager
 from features.import_export import ImportExportDialog
 from features.template import TemplateManager
+from features.updater import (
+    UpdateChecker, UpdateDownloader, UpdateDialog, UpdateProgressDialog,
+    detect_install_type, execute_update
+)
 
 
 class StickyNoteManager:
@@ -93,6 +97,12 @@ class StickyNoteManager:
         self.load_notes()
 
         self.settings_dialog = None
+
+        # 自动检查更新（延迟3秒，避免影响启动速度）
+        self._update_checker = None
+        self._update_downloader = None
+        if self.settings.get('auto_check_update', True):
+            QTimer.singleShot(3000, lambda: self.check_for_updates(manual=False))
 
     # ==================== 全局快捷键 ====================
 
@@ -199,7 +209,11 @@ class StickyNoteManager:
         settings_action = QAction("设置", self.app)
         settings_action.triggered.connect(self.open_settings)
         self.tray_menu.addAction(settings_action)
-        
+
+        check_update_action = QAction("检查更新", self.app)
+        check_update_action.triggered.connect(lambda: self.check_for_updates(manual=True))
+        self.tray_menu.addAction(check_update_action)
+
         help_action = QAction("帮助", self.app)
         help_action.triggered.connect(self.show_help_dialog)
         self.tray_menu.addAction(help_action)
@@ -613,6 +627,156 @@ class StickyNoteManager:
                 QMessageBox.information(None, '\u5f00\u673a\u81ea\u542f', '\u5df2\u7981\u7528\u5f00\u673a\u81ea\u542f\u3002')
             else:
                 self.autostart_action.setChecked(True)
+
+    # ==================== 保存与更新 ====================
+
+    def save_window_positions(self):
+        """保存所有便签的窗口位置到历史记录"""
+        try:
+            self.position_manager.save_position_history()
+        except Exception as e:
+            print(f"保存窗口位置时出错: {e}")
+
+    # ==================== 更新流程 ====================
+
+    def check_for_updates(self, manual=False):
+        """
+        启动版本检查。
+        
+        Args:
+            manual: True = 用户手动触发，会显示"已是最新版本"提示
+        """
+        self._update_manual = manual
+        self._update_checker = UpdateChecker(__version__)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.no_update.connect(lambda: self._on_no_update(manual))
+        self._update_checker.check_failed.connect(self._on_update_check_failed)
+        self._update_checker.start()
+
+    def _on_update_available(self, update_info):
+        # 检查是否已跳过此版本
+        skip_version = self.settings.get('skip_version', '')
+        if update_info['tag'] == skip_version:
+            if self._update_manual:
+                # 手动检查时仍提示
+                pass
+            else:
+                return
+
+        # 显示更新对话框
+        dialog = UpdateDialog(update_info, __version__)
+        dialog.exec_()
+
+        if dialog.action == 'update':
+            self._start_download_update(update_info)
+        elif dialog.action == 'skip':
+            self.settings['skip_version'] = update_info['tag']
+            self.save_settings()
+            self._restore_manual_check_btn()
+        else:
+            # later - 什么都不做
+            self._restore_manual_check_btn()
+
+    def _on_no_update(self, manual=False):
+        if manual:
+            QMessageBox.information(
+                None, '检查更新', '当前已是最新版本。'
+            )
+        self._restore_manual_check_btn()
+
+    def _on_update_check_failed(self, error_msg):
+        if hasattr(self, '_update_manual') and self._update_manual:
+            QMessageBox.warning(None, '检查更新失败', f'无法检查更新：\n{error_msg}')
+        else:
+            print(f'[更新] 自动检查失败: {error_msg}')
+        self._restore_manual_check_btn()
+
+    def _restore_manual_check_btn(self):
+        """恢复设置对话框中的'检查更新'按钮状态"""
+        if self.settings_dialog and hasattr(self.settings_dialog, 'check_update_btn'):
+            self.settings_dialog.check_update_btn.setEnabled(True)
+            self.settings_dialog.check_update_btn.setText("立即检查更新")
+            if hasattr(self, '_last_check_status'):
+                self.settings_dialog.update_status_label.setText(self._last_check_status)
+
+    def _start_download_update(self, update_info):
+        """开始下载更新文件"""
+        assets = update_info.get('assets', [])
+        if not assets:
+            QMessageBox.warning(None, '更新失败', '未找到可下载的更新文件。')
+            self._restore_manual_check_btn()
+            return
+
+        # 检测安装类型并匹配合适的资产
+        install_type = detect_install_type()
+        asset = self._match_asset(assets, install_type)
+        if not asset:
+            QMessageBox.warning(
+                None, '更新失败',
+                f'未找到适用于当前安装类型（{install_type}）的更新包。'
+            )
+            self._restore_manual_check_btn()
+            return
+
+        download_url = asset.get('browser_download_url', '')
+        asset_name = asset.get('name', 'update_package')
+        total_size = asset.get('size', 0)
+        size_mb = round(total_size / (1024 * 1024), 1)
+
+        # 显示进度对话框
+        self._progress_dialog = UpdateProgressDialog(size_mb)
+        self._progress_dialog.show()
+
+        # 启动下载
+        self._update_downloader = UpdateDownloader(download_url, asset_name, install_type)
+        self._update_downloader.progress.connect(self._on_download_progress)
+        self._update_downloader.download_finished.connect(self._on_download_finished)
+        self._update_downloader.download_failed.connect(self._on_download_failed)
+        self._update_downloader.start()
+
+    def _match_asset(self, assets, install_type):
+        """根据安装类型匹配最合适的下载资产"""
+        if install_type == 'msi':
+            for asset in assets:
+                name = asset.get('name', '').lower()
+                if name.endswith('.msi'):
+                    return asset
+        # portable 或 source — 使用 .exe
+        for asset in assets:
+            name = asset.get('name', '').lower()
+            if name.endswith('.exe'):
+                return asset
+        # 回退: 返回第一个资产
+        return assets[0] if assets else None
+
+    def _on_download_progress(self, percent):
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.set_progress(percent)
+
+    def _on_download_finished(self, file_path):
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.accept()
+            self._progress_dialog = None
+
+        install_type = detect_install_type()
+
+        # 确认后执行更新
+        reply = QMessageBox.question(
+            None, '下载完成',
+            '更新文件已下载完成，是否立即安装？\n\n'
+            '应用将自动退出并开始更新。',
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            execute_update(self, file_path, install_type)
+        self._restore_manual_check_btn()
+
+    def _on_download_failed(self, error_msg):
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.accept()
+            self._progress_dialog = None
+        QMessageBox.warning(None, '下载失败', error_msg)
+        self._restore_manual_check_btn()
 
     # ==================== 应用生命周期 ====================
 

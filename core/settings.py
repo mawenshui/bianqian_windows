@@ -52,6 +52,10 @@ class SettingsDialog(QDialog):
         self.setup_font_tab(font_tab)
         tab_widget.addTab(font_tab, "\u5b57\u4f53\u8bbe\u7f6e")
 
+        update_tab = QWidget()
+        self.setup_update_tab(update_tab)
+        tab_widget.addTab(update_tab, "\u66f4\u65b0\u8bbe\u7f6e")
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(tab_widget)
 
@@ -225,3 +229,63 @@ class SettingsDialog(QDialog):
 
     def change_theme(self):
         self.on_theme_changed()
+
+    # ==================== 更新设置 ====================
+
+    def setup_update_tab(self, tab_widget):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        # 自动检查更新
+        auto_group = QGroupBox("\u81ea\u52a8\u66f4\u65b0")
+        auto_layout = QVBoxLayout()
+
+        self.auto_update_checkbox = QCheckBox("\u542f\u52a8\u540e\u81ea\u52a8\u68c0\u67e5\u65b0\u7248\u672c")
+        auto_check = self.manager.settings.get('auto_check_update', True)
+        self.auto_update_checkbox.setChecked(auto_check)
+        self.auto_update_checkbox.stateChanged.connect(self.on_auto_update_changed)
+        auto_layout.addWidget(self.auto_update_checkbox)
+
+        hint_label = QLabel("\u542f\u7528\u540e\uff0c\u6bcf\u6b21\u542f\u52a8\u5e94\u7528\u65f6\u4f1a\u5728\u540e\u53f0\u81ea\u52a8\u68c0\u67e5 GitHub \u662f\u5426\u6709\u65b0\u7248\u672c\u53d1\u5e03\u3002")
+        hint_label.setStyleSheet("color: #888; font-size: 10pt;")
+        hint_label.setWordWrap(True)
+        auto_layout.addWidget(hint_label)
+
+        auto_group.setLayout(auto_layout)
+        layout.addWidget(auto_group)
+
+        # 手动检查
+        manual_group = QGroupBox("\u624b\u52a8\u68c0\u67e5")
+        manual_layout = QVBoxLayout()
+
+        manual_hint = QLabel("\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u7acb\u5373\u68c0\u67e5\u662f\u5426\u6709\u65b0\u7248\u672c\u53ef\u7528\u3002")
+        manual_hint.setWordWrap(True)
+        manual_layout.addWidget(manual_hint)
+
+        self.check_update_btn = QPushButton("\u7acb\u5373\u68c0\u67e5\u66f4\u65b0")
+        self.check_update_btn.setFixedHeight(36)
+        self.check_update_btn.clicked.connect(self.on_manual_check_update)
+        manual_layout.addWidget(self.check_update_btn)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setStyleSheet("color: #4a86e8;")
+        self.update_status_label.setWordWrap(True)
+        manual_layout.addWidget(self.update_status_label)
+
+        manual_group.setLayout(manual_layout)
+        layout.addWidget(manual_group)
+
+        layout.addStretch()
+        tab_widget.setLayout(layout)
+
+    def on_auto_update_changed(self):
+        enabled = self.auto_update_checkbox.isChecked()
+        self.manager.settings['auto_check_update'] = enabled
+        self.manager.save_settings()
+
+    def on_manual_check_update(self):
+        self.check_update_btn.setEnabled(False)
+        self.check_update_btn.setText("\u6b63\u5728\u68c0\u67e5...")
+        self.update_status_label.setText("")
+        self.manager.check_for_updates(manual=True)

@@ -16,6 +16,7 @@ include_files = [
 
 # 构建选项
 build_exe_options = {
+    'build_exe': 'dist/StickyNote',
     'packages': [
         'PyQt5', 'pywintypes', 'win32api', 'win32con', 'win32gui',
     ],
@@ -24,7 +25,7 @@ build_exe_options = {
     ],
     'include_files': include_files,
     'excludes': [
-        'tkinter', 'unittest', 'email', 'http', 'xmlrpc',
+        'tkinter', 'unittest', 'email', 'xmlrpc',
         # 排除未使用的 PyQt5 子模块，避免 cx_Freeze 寻找缺失的 QML 等路径
         'PyQt5.QtQml', 'PyQt5.QtQuick', 'PyQt5.QtQuickWidgets',
         'PyQt5.QtSql', 'PyQt5.QtNetwork', 'PyQt5.QtSvg',
@@ -61,7 +62,7 @@ executables = [
 
 setup(
     name='桌面便签',
-    version='1.3.1',
+    version='1.4.0',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='StickyNote Team',
     options={

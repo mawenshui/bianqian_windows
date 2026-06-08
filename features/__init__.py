@@ -7,7 +7,8 @@ StickyNote 功能模块
 - backup: 备份功能
 - shortcuts: 快捷键管理
 - undo_redo: 撤销重做功能
+- updater: 自动更新功能
 """
 
-__version__ = '1.1.0'
+__version__ = '1.4.0'
 __author__ = 'StickyNote Team'

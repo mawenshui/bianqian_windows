@@ -48,7 +48,8 @@ def get_user_data_dir():
 
 from core.note import StickyNote, PlainLineEdit, PlainTextEdit, NoteSaveWorker, NoteLoadWorker, RESIZE_MARGIN
 from core.settings import SettingsDialog
-from core.manager import StickyNoteManager
 
-__version__ = '1.3.1'
+__version__ = '1.4.0'
 __author__ = 'StickyNote Team'
+
+from core.manager import StickyNoteManager

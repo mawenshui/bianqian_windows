@@ -1,0 +1,320 @@
+# -*- coding: utf-8 -*-
+"""
+Manager 更新流程集成测试
+
+测试 manager.py 中自动更新相关的关键逻辑：
+- 版本检查信号连接
+- 跳过版本逻辑
+- 资产匹配
+- 设置对话框更新标签页
+- 各种边界条件
+"""
+import sys
+import os
+import json
+import unittest
+from unittest.mock import patch, MagicMock, PropertyMock, call
+
+# 添加项目根目录
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 需要一个假的 QApplication 才能导入 PyQt 相关模块
+from PyQt5.QtWidgets import QApplication
+
+# 确保 QApplication 实例存在（测试环境）
+_app = QApplication.instance()
+if _app is None:
+    _app = QApplication(sys.argv)
+
+
+class TestManagerUpdateHelper(unittest.TestCase):
+    """测试 Manager 更新辅助方法（不需要完整 Manager 实例）"""
+
+    def test_match_asset_msi_preferred(self):
+        """_match_asset: MSI 模式下优先匹配 .msi"""
+        # 惰性导入以模拟安装类型
+        from core.manager import StickyNoteManager
+        from features.updater import detect_install_type
+
+        assets = [
+            {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe'},
+            {'name': 'StickyNote.msi', 'browser_download_url': 'https://x.com/e.msi'},
+        ]
+
+        # 模拟 manager 实例
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+
+        result = mgr._match_asset(assets, 'msi')
+        self.assertEqual(result['name'], 'StickyNote.msi')
+
+    def test_match_asset_portable_prefers_exe(self):
+        """_match_asset: portable 模式优先匹配 .exe"""
+        from core.manager import StickyNoteManager
+
+        assets = [
+            {'name': 'StickyNote.msi', 'browser_download_url': 'https://x.com/e.msi'},
+            {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe'},
+        ]
+
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+
+        result = mgr._match_asset(assets, 'portable')
+        self.assertEqual(result['name'], 'StickyNote.exe')
+
+    def test_match_asset_only_exe_available(self):
+        """_match_asset: MSI 模式但只有 .exe，应回退到 .exe"""
+        from core.manager import StickyNoteManager
+
+        assets = [
+            {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe'},
+        ]
+
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+
+        result = mgr._match_asset(assets, 'msi')
+        self.assertEqual(result['name'], 'StickyNote.exe')
+
+    def test_match_asset_empty_list(self):
+        """_match_asset: 空资产列表返回 None"""
+        from core.manager import StickyNoteManager
+
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+
+        result = mgr._match_asset([], 'portable')
+        self.assertIsNone(result)
+
+    def test_match_asset_multiple_exe(self):
+        """_match_asset: 多个 .exe 时返回第一个"""
+        from core.manager import StickyNoteManager
+
+        assets = [
+            {'name': 'StickyNote-x64.exe', 'browser_download_url': 'https://x.com/1'},
+            {'name': 'StickyNote-x86.exe', 'browser_download_url': 'https://x.com/2'},
+        ]
+
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+
+        result = mgr._match_asset(assets, 'portable')
+        self.assertEqual(result['name'], 'StickyNote-x64.exe')
+
+
+class TestUpdateFlowWithMock(unittest.TestCase):
+    """使用 Mock 测试更新流程"""
+
+    def setUp(self):
+        from core.manager import StickyNoteManager
+        self.update_info = {
+            'version': '1.4.0',
+            'tag': 'v1.4.0',
+            'body': 'Bug fixes',
+            'html_url': 'https://github.com/test',
+            'assets': [
+                {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe',
+                 'size': 1024000},
+            ],
+        }
+
+    def test_check_for_updates_creates_checker(self):
+        """check_for_updates 应创建 UpdateChecker 并连接信号"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.UpdateChecker') as mock_checker_cls:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._update_checker = None
+            mgr._update_manual = False
+
+            mock_checker = MagicMock()
+            mock_checker_cls.return_value = mock_checker
+
+            mgr.check_for_updates(manual=True)
+
+            mock_checker_cls.assert_called_once()
+            self.assertTrue(mock_checker.update_available.connect.called)
+            self.assertTrue(mock_checker.start.called)
+            self.assertTrue(mgr._update_manual)
+
+    def test_skip_version_auto_check(self):
+        """自动检查时跳过已忽略版本"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr.settings = {'skip_version': 'v1.4.0'}
+            mgr._update_manual = False
+            mgr._start_download_update = MagicMock()
+            mgr._restore_manual_check_btn = MagicMock()
+            mgr.save_settings = MagicMock()
+
+            # 应该直接 return，不启动下载
+            mgr._on_update_available(self.update_info)
+            mgr._start_download_update.assert_not_called()
+
+    def test_skip_version_manual_check(self):
+        """手动检查时跳过已忽略版本仍应显示对话框"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.UpdateDialog') as mock_dialog_cls:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr.settings = {'skip_version': 'v1.4.0'}
+            mgr._update_manual = True
+            mgr._start_download_update = MagicMock()
+            mgr._restore_manual_check_btn = MagicMock()
+            mgr.save_settings = MagicMock()
+
+            mock_dialog = MagicMock()
+            mock_dialog.action = 'later'
+            mock_dialog.exec_.return_value = None
+            mock_dialog_cls.return_value = mock_dialog
+
+            mgr._on_update_available(self.update_info)
+
+            # 手动检查时仍应创建对话框
+            mock_dialog_cls.assert_called_once_with(self.update_info, '1.3.1')
+
+    def test_no_update_manual_shows_message(self):
+        """手动检查无更新时显示提示"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.QMessageBox.information') as mock_info:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._update_manual = True
+            mgr._restore_manual_check_btn = MagicMock()
+
+            mgr._on_no_update(manual=True)
+            mock_info.assert_called_once()
+
+    def test_no_update_auto_silent(self):
+        """自动检查无更新时静默"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.QMessageBox.information') as mock_info:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._update_manual = False
+            mgr._restore_manual_check_btn = MagicMock()
+
+            mgr._on_no_update(manual=False)
+            mock_info.assert_not_called()
+
+    def test_check_failed_manual_shows_warning(self):
+        """手动检查失败显示警告"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.QMessageBox.warning') as mock_warn:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._update_manual = True
+            mgr._restore_manual_check_btn = MagicMock()
+
+            mgr._on_update_check_failed('Test error')
+            mock_warn.assert_called_once()
+
+    def test_check_failed_auto_prints(self):
+        """自动检查失败输出日志"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('builtins.print') as mock_print:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._update_manual = False
+            mgr._restore_manual_check_btn = MagicMock()
+
+            mgr._on_update_check_failed('Test error')
+            mock_print.assert_called_once()
+
+    def test_start_download_empty_assets(self):
+        """无资产时显示错误"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
+             patch('core.manager.QMessageBox.warning') as mock_warn:
+
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr._restore_manual_check_btn = MagicMock()
+
+            mgr._start_download_update({'assets': []})
+            mock_warn.assert_called_once()
+
+    def test_match_asset_fallback(self):
+        """_match_asset 在无标准格式(.msi/.exe)时回退到首个资产"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            # 只有 .zip 文件，应回退到 assets[0]
+            result = mgr._match_asset(
+                [{'name': 'source.zip', 'url': 'https://x.com/s.zip'}],
+                'portable'
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual(result['name'], 'source.zip')
+
+    def test_match_asset_prefers_msi(self):
+        """_match_asset MSI模式下优先匹配.msi"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            assets = [
+                {'name': 'app.exe', 'url': 'https://x.com/app.exe'},
+                {'name': 'app.msi', 'url': 'https://x.com/app.msi'},
+            ]
+            result = mgr._match_asset(assets, 'msi')
+            self.assertEqual(result['name'], 'app.msi')
+
+    def test_match_asset_prefers_exe_portable(self):
+        """_match_asset portable模式下优先匹配.exe"""
+        from core.manager import StickyNoteManager
+        with patch('core.manager.StickyNoteManager.__init__', return_value=None):
+            mgr = StickyNoteManager.__new__(StickyNoteManager)
+            assets = [
+                {'name': 'source.zip', 'url': 'https://x.com/s.zip'},
+                {'name': 'app.exe', 'url': 'https://x.com/app.exe'},
+            ]
+            result = mgr._match_asset(assets, 'portable')
+            self.assertEqual(result['name'], 'app.exe')
+
+
+class TestSettingsUpdateTab(unittest.TestCase):
+    """设置对话框更新标签页测试"""
+
+    def test_update_tab_added(self):
+        """验证更新标签页被添加到设置"""
+        from core.settings import SettingsDialog
+        with patch('core.settings.SettingsDialog.__init__', return_value=None):
+            dlg = SettingsDialog.__new__(SettingsDialog)
+            dlg.manager = MagicMock()
+            dlg.manager.settings = {'auto_check_update': True}
+            dlg.manager.save_settings = MagicMock()
+            dlg.manager.get_default_theme_css = MagicMock(return_value="soft_yellow.css")
+            dlg.manager.get_available_themes = MagicMock(return_value={"柔和黄": "soft_yellow.css"})
+            dlg.manager.get_theme_name_by_css = MagicMock(return_value="柔和黄")
+            dlg.manager.get_default_font = MagicMock(return_value=None)
+
+        # 验证 setup_update_tab 存在且可调用
+        self.assertTrue(hasattr(SettingsDialog, 'setup_update_tab'))
+        self.assertTrue(hasattr(SettingsDialog, 'on_auto_update_changed'))
+        self.assertTrue(hasattr(SettingsDialog, 'on_manual_check_update'))
+
+    def test_auto_update_checkbox_persists(self):
+        """自动更新复选框修改后保存设置"""
+        from core.settings import SettingsDialog
+        with patch('core.settings.SettingsDialog.__init__', return_value=None):
+            dlg = SettingsDialog.__new__(SettingsDialog)
+            dlg.manager = MagicMock()
+            dlg.manager.settings = {'auto_check_update': True}
+            dlg.auto_update_checkbox = MagicMock()
+            dlg.auto_update_checkbox.isChecked.return_value = False
+
+            dlg.on_auto_update_changed()
+
+            self.assertFalse(dlg.manager.settings['auto_check_update'])
+            dlg.manager.save_settings.assert_called_once()
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
