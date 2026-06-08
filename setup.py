@@ -46,6 +46,23 @@ bdist_msi_options = {
         'keywords': 'sticky,note,便签,桌面',
     },
     'install_icon': os.path.join(project_dir, 'icon.png') if os.path.exists(os.path.join(project_dir, 'icon.png')) else None,
+    # 安装完成后显示"立即运行"复选框
+    'launch_on_finish': True,
+    # 自定义 MSI 表数据：自动在用户选择的目录后追加 StickyNote\ 子目录
+    'data': {
+        'CustomAction': [
+            # 类型 51: 将 TARGETDIR 设置为 [TARGETDIR]StickyNote\（追加子目录）
+            ('A_APPEND_STICKYNOTE_DIR', 51, 'TARGETDIR', '[TARGETDIR]StickyNote' + '\\'),
+        ],
+        'InstallUISequence': [
+            # 在 SelectDirectoryDlg(1230) 之后、ProgressDlg(1280) 之前执行
+            ('A_APPEND_STICKYNOTE_DIR', 'NOT Installed', 1235),
+        ],
+        'InstallExecuteSequence': [
+            # 静默安装时也同样追加子目录
+            ('A_APPEND_STICKYNOTE_DIR', 'NOT Installed', 1235),
+        ],
+    },
 }
 
 # 可执行文件配置
@@ -62,7 +79,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.5.2',
+    version='1.5.3',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={
