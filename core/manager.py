@@ -15,6 +15,7 @@ import sys
 import os
 import json
 import winreg
+import urllib.request
 from functools import partial
 
 from PyQt5.QtWidgets import (
@@ -726,17 +727,18 @@ class StickyNoteManager:
                 self.settings_dialog.update_status_label.setText(self._last_check_status)
 
     def _start_download_update(self, update_info):
-        """开始下载更新文件"""
+        """开始下载更新 — 统一下载 portable ZIP"""
         assets = update_info.get('assets', [])
         if not assets:
             QMessageBox.warning(None, '更新失败', '未找到可下载的更新文件。')
             self._restore_manual_check_btn()
             return
 
-        # 检测安装类型并匹配合适的资产
+        # 检测安装类型并匹配资产
         install_type = detect_install_type()
-        asset = self._match_asset(assets, install_type)
-        if not asset:
+        zip_asset, msi_asset = self._match_asset(assets, install_type)
+
+        if not zip_asset:
             QMessageBox.warning(
                 None, '更新失败',
                 f'未找到适用于当前安装类型（{install_type}）的更新包。'
@@ -744,47 +746,71 @@ class StickyNoteManager:
             self._restore_manual_check_btn()
             return
 
-        download_url = asset.get('browser_download_url', '')
-        asset_name = asset.get('name', 'update_package')
-        total_size = asset.get('size', 0)
+        # 保存 MSI 资产引用和安装类型，供下载完成后使用
+        self._pending_msi_asset = msi_asset
+        self._pending_install_type = install_type
+
+        download_url = zip_asset.get('browser_download_url', '')
+        asset_name = zip_asset.get('name', 'update_package')
+        total_size = zip_asset.get('size', 0)
         size_mb = round(total_size / (1024 * 1024), 1)
 
         # 显示进度对话框
         self._progress_dialog = UpdateProgressDialog(size_mb)
         self._progress_dialog.show()
 
-        # 启动下载
-        self._update_downloader = UpdateDownloader(download_url, asset_name, install_type)
+        # 启动下载（统一下载 ZIP，不再需要 install_type 参数）
+        self._update_downloader = UpdateDownloader(download_url, asset_name)
         self._update_downloader.progress.connect(self._on_download_progress)
         self._update_downloader.download_finished.connect(self._on_download_finished)
         self._update_downloader.download_failed.connect(self._on_download_failed)
         self._update_downloader.start()
 
     def _match_asset(self, assets, install_type):
-        """根据安装类型匹配最合适的下载资产"""
-        if install_type == 'msi':
-            for asset in assets:
-                name = asset.get('name', '').lower()
-                if name.endswith('.msi'):
-                    return asset
-        # portable 或 source — 使用 .exe
+        """
+        统一下载策略：始终返回 portable ZIP 资产。
+        对于 MSI 用户，额外标记 MSI 资产（用于更新注册表）。
+        
+        Returns:
+            (zip_asset, msi_asset_or_none): ZIP 始终优先，MSI 仅 MSI 用户需要
+        """
+        zip_asset = None
+        msi_asset = None
+
         for asset in assets:
             name = asset.get('name', '').lower()
-            if name.endswith('.exe'):
-                return asset
-        # 回退: 返回第一个资产
-        return assets[0] if assets else None
+            if name.endswith('.zip'):
+                zip_asset = asset
+            elif name.endswith('.msi'):
+                msi_asset = asset
+
+        if not zip_asset:
+            return (None, None)
+
+        if install_type == 'msi':
+            return (zip_asset, msi_asset)
+        else:
+            return (zip_asset, None)
 
     def _on_download_progress(self, percent):
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.set_progress(percent)
 
     def _on_download_finished(self, file_path):
+        """ZIP 下载完成"""
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.accept()
             self._progress_dialog = None
 
-        install_type = detect_install_type()
+        install_type = getattr(self, '_pending_install_type', 'portable')
+        msi_asset = getattr(self, '_pending_msi_asset', None)
+
+        # MSI 用户：额外下载 MSI 用于更新注册表
+        msi_path = None
+        if install_type == 'msi' and msi_asset:
+            msi_url = msi_asset.get('browser_download_url', '')
+            msi_name = msi_asset.get('name', 'update.msi')
+            msi_path = self._download_msi_sync(msi_url, msi_name)
 
         # 确认后执行更新
         reply = QMessageBox.question(
@@ -794,8 +820,29 @@ class StickyNoteManager:
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            execute_update(self, file_path, install_type)
+            execute_update(self, file_path, install_type, msi_path)
         self._restore_manual_check_btn()
+
+    def _download_msi_sync(self, url, name):
+        """
+        同步下载 MSI 文件（体积较小，主线程短时阻塞可接受）。
+        
+        Returns:
+            str: 临时文件路径，失败返回 None
+        """
+        try:
+            import os
+            import tempfile
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+            temp_path = os.path.join(tempfile.gettempdir(), name)
+            with open(temp_path, 'wb') as f:
+                f.write(data)
+            return temp_path
+        except Exception as e:
+            print(f'[更新] MSI 下载失败（将仅更新文件，跳过注册表）: {e}')
+            return None
 
     def _on_download_failed(self, error_msg):
         if hasattr(self, '_progress_dialog') and self._progress_dialog:

@@ -26,6 +26,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QTextEdit, QProgressBar
 )
 
+from core import get_project_root
+
 # ==================== 常量 ====================
 
 GITHUB_REPO = 'mawenshui/bianqian_windows'
@@ -186,11 +188,10 @@ class UpdateDownloader(QThread):
     download_finished = pyqtSignal(str)
     download_failed = pyqtSignal(str)
     
-    def __init__(self, download_url, asset_name, install_type):
+    def __init__(self, download_url, asset_name):
         super().__init__()
         self._download_url = download_url
         self._asset_name = asset_name
-        self._install_type = install_type
         self._aborted = False
     
     def abort(self):
@@ -393,90 +394,131 @@ class UpdateProgressDialog(QDialog):
 
 # ==================== 安装辅助 ====================
 
-def prepare_update_helper(install_type):
+def generate_bat_script(pid, zip_path, exe_dir, install_type, msi_path=None):
     """
-    生成 PowerShell 辅助脚本内容。
+    生成 .bat 更新辅助批处理脚本。
     
-    该脚本会在主进程退出后执行：
-    - portable: 等待进程退出 → 移动新文件覆盖旧文件 → 重新启动
-    - msi: 等待进程退出 → 执行 msiexec /i → 自动升级
+    执行流程:
+    1. 写入日志头到 %TEMP%\\stickynote_update.log
+    2. 轮询等待 PID 退出（每 1 秒检查，最多 60 秒）
+    3. 使用 PowerShell Expand-Archive 解压 ZIP 到临时目录
+    4. robocopy 复制文件到目标目录（重试 3 次，间隔 5 秒）
+    5. MSI 用户：调用 msiexec /i 更新注册表
+    6. 清理临时文件
+    7. 重启 StickyNote.exe
+    8. 显示日志并等待 10 秒后自动关闭
     """
-    if install_type == 'msi':
-        # MSI 升级策略：获取 MSI 文件路径，执行静默升级
-        return r'''
-param(
-    [string]$ExePath,
-    [string]$NewFilePath,
-    [string]$WindowPosFile
-)
+    # 构建 robocopy 排除参数
+    robocopy_excludes = '/XD notes backups templates /XF settings.json tags.json window_positions.json'
 
-$ErrorActionPreference = 'Stop'
-
-# 等待旧进程退出
-Start-Sleep -Seconds 2
-$timeout = 30
-while ($timeout -gt 0) {
-    $proc = Get-Process -Name 'StickyNote' -ErrorAction SilentlyContinue
-    if (-not $proc) { break }
-    Start-Sleep -Seconds 1
-    $timeout--
-}
-
-try {
-    # MSI 静默升级
-    Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$NewFilePath`" /quiet /norestart" -Wait
-    
-    # 启动新版本
-    Start-Process -FilePath $ExePath
-} catch {
-    Write-Error "MSI 升级失败: $_"
-}
+    msi_block = ''
+    msi_cleanup = ''
+    if install_type == 'msi' and msi_path:
+        # MSI 路径中的反斜杠需要转义
+        msi_escaped = msi_path.replace('\\', '\\\\')
+        msi_block = f'''
+:: ===== Step 5: Update MSI registration =====
+echo [%date% %time%] Updating MSI registration via msiexec... >> "%LOGFILE%"
+msiexec /i "{msi_path}" /quiet /norestart >> "%LOGFILE%" 2>&1
+echo [%date% %time%] MSI registration update exit code: %ERRORLEVEL% >> "%LOGFILE%"
 '''
-    else:
-        # Portable / Source: 直接替换 exe
-        return r'''
-param(
-    [string]$ExePath,
-    [string]$NewFilePath,
-    [string]$WindowPosFile
+        msi_cleanup = f'del /q "{msi_path}" 2>nul\n'
+
+    bat_content = f'''@echo off
+setlocal enabledelayedexpansion
+
+set LOGFILE=%TEMP%\\stickynote_update.log
+echo [%date% %time%] === StickyNote Update v1.5.2 === > "%LOGFILE%"
+echo [%date% %time%] PID={pid} TARGET={exe_dir} TYPE={install_type} >> "%LOGFILE%"
+
+:: ===== Step 1: Wait for main process to exit =====
+echo [%date% %time%] Waiting for process PID {pid} to exit... >> "%LOGFILE%"
+set WAIT_COUNT=0
+:waitloop
+timeout /t 1 /nobreak >nul
+tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul
+if errorlevel 1 goto :process_exited
+set /a WAIT_COUNT+=1
+if %WAIT_COUNT% LSS 60 goto :waitloop
+echo [%date% %time%] WARNING: Process did not exit within 60s, proceeding anyway >> "%LOGFILE%"
+
+:process_exited
+echo [%date% %time%] Main process exited (or timeout). >> "%LOGFILE%"
+
+:: ===== Step 2: Extract ZIP =====
+set EXTRACT_DIR=%TEMP%\\stickynote_extract_%RANDOM%
+mkdir "%EXTRACT_DIR%" 2>nul
+echo [%date% %time%] Extracting ZIP... >> "%LOGFILE%"
+powershell -NoProfile -Command "Expand-Archive -Path '{zip_path}' -DestinationPath '%EXTRACT_DIR%' -Force" >> "%LOGFILE%" 2>&1
+if errorlevel 1 (
+    echo [%date% %time%] ERROR: Failed to extract ZIP >> "%LOGFILE%"
+    goto :error
 )
+echo [%date% %time%] ZIP extraction complete. >> "%LOGFILE%"
 
-$ErrorActionPreference = 'Stop'
+:: ===== Step 3: Find extracted source directory =====
+set SRC_DIR=%EXTRACT_DIR%
+for /d %%d in ("%EXTRACT_DIR%\\*") do (
+    set SRC_DIR=%%d
+    goto :found_src
+)
+:found_src
+echo [%date% %time%] Source directory: %SRC_DIR% >> "%LOGFILE%"
 
-# 等待旧进程退出
-Start-Sleep -Seconds 2
-$timeout = 30
-while ($timeout -gt 0) {
-    $proc = Get-Process -Name 'StickyNote' -ErrorAction SilentlyContinue
-    if (-not $proc) { break }
-    Start-Sleep -Seconds 1
-    $timeout--
-}
+:: ===== Step 4: robocopy with retry =====
+echo [%date% %time%] Copying files with robocopy (retries:3, wait:5s)... >> "%LOGFILE%"
+robocopy "%SRC_DIR%" "{exe_dir}" /E /R:3 /W:5 /NP /NDL {robocopy_excludes} >> "%LOGFILE%" 2>&1
+set ROBO_EXIT=%ERRORLEVEL%
+if %ROBO_EXIT% GEQ 8 (
+    echo [%date% %time%] ERROR: robocopy failed with exit code %ROBO_EXIT% >> "%LOGFILE%"
+    goto :error
+)
+echo [%date% %time%] File copy complete (robocopy exit: %ROBO_EXIT%). >> "%LOGFILE%"
+{msi_block}
+:: ===== Step 6: Cleanup =====
+echo [%date% %time%] Cleaning up temporary files... >> "%LOGFILE%"
+rmdir /s /q "%EXTRACT_DIR%" 2>nul
+del /q "{zip_path}" 2>nul
+{msi_cleanup}
+:: ===== Step 7: Restart application =====
+echo [%date% %time%] Starting new version... >> "%LOGFILE%"
+start "" "{exe_dir}\\StickyNote.exe"
+echo [%date% %time%] === Update completed successfully === >> "%LOGFILE%"
 
-try {
-    # 覆盖旧文件
-    Copy-Item -Path $NewFilePath -Destination $ExePath -Force
-    
-    # 清理临时目录
-    $tempDir = Split-Path -Parent $NewFilePath
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-    
-    # 启动新版本
-    Start-Process -FilePath $ExePath
-} catch {
-    Write-Error "文件替换失败: $_"
-}
+:: ===== Step 8: Show result =====
+echo.
+echo ============================================
+echo   StickyNote update completed successfully!
+echo   Log file: %LOGFILE%
+echo ============================================
+echo.
+echo This window will close in 10 seconds...
+timeout /t 10 /nobreak >nul
+exit /b 0
+
+:error
+echo [%date% %time%] === Update FAILED === >> "%LOGFILE%"
+echo.
+echo ============================================
+echo   UPDATE FAILED!
+echo   See log: %LOGFILE%
+echo ============================================
+echo.
+pause
+exit /b 1
 '''
+    return bat_content
 
 
-def execute_update(manager, new_file_path, install_type):
+def execute_update(manager, zip_file_path, install_type, msi_path=None):
     """
-    执行更新流程的最后一步：保存窗口位置 → 生成辅助脚本 → 启动脚本并退出应用。
+    执行更新流程最后一步：保存窗口位置 → 生成 .bat 脚本 → 启动脚本并退出应用。
     
     Args:
         manager: 主窗口 Manager 实例
-        new_file_path: 下载的新文件路径 (.exe 或 .msi)
+        zip_file_path: 下载的 portable ZIP 文件路径
         install_type: 安装类型 ('msi' | 'portable' | 'source')
+        msi_path: MSI 文件路径（仅 MSI 用户需要，用于更新注册表）
     """
     # 保存窗口位置
     if hasattr(manager, 'save_window_positions'):
@@ -484,35 +526,34 @@ def execute_update(manager, new_file_path, install_type):
             manager.save_window_positions()
         except Exception:
             pass
-    
-    # 生成 PowerShell 脚本
-    helper_script = prepare_update_helper(install_type)
-    script_path = os.path.join(tempfile.gettempdir(), 'stickynote_update_helper.ps1')
-    with open(script_path, 'w', encoding='utf-8') as f:
-        f.write(helper_script)
-    
-    # 获取窗口位置文件路径
-    pos_file = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', 'window_positions.json'
-    )
-    pos_file = os.path.normpath(pos_file)
-    
-    # 启动辅助脚本（使用 -WindowStyle Hidden 隐藏 PowerShell 窗口）
+
+    # 获取当前进程 PID
+    pid = os.getpid()
+
+    # 确定目标 exe 目录
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发模式：使用项目根目录下的 dist/StickyNote（如果存在）
+        exe_dir = os.path.join(get_project_root(), 'dist', 'StickyNote')
+        if not os.path.isdir(exe_dir):
+            exe_dir = os.path.dirname(sys.executable)
+
+    # 生成 .bat 脚本
+    bat_script = generate_bat_script(pid, zip_file_path, exe_dir, install_type, msi_path)
+    bat_path = os.path.join(tempfile.gettempdir(), 'stickynote_update.bat')
+    with open(bat_path, 'w', encoding='utf-8') as f:
+        f.write(bat_script)
+
+    # 启动 .bat（CREATE_NEW_CONSOLE 使控制台可见，用户能看到进度）
     try:
         subprocess.Popen(
-            [
-                'powershell.exe', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
-                '-File', script_path,
-                '-ExePath', sys.executable,
-                '-NewFilePath', new_file_path,
-                '-WindowPosFile', pos_file
-            ],
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            ['cmd.exe', '/c', bat_path],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
         )
-    except Exception:
-        # 备用方案: 直接退出，需要用户手动更新
-        pass
-    
+    except Exception as e:
+        print(f'[更新] 无法启动更新脚本: {e}')
+
     # 退出应用
     from PyQt5.QtWidgets import QApplication
     QApplication.instance().quit()
