@@ -39,9 +39,9 @@ build_exe_options = {
 bdist_msi_options = {
     'add_to_path': False,
     'upgrade_code': '{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}',
-    'initial_target_dir': r'[ProgramFilesFolder]\StickyNote',
+    'initial_target_dir': r'[ProgramFilesFolder]',
     'summary_data': {
-        'author': 'StickyNote Team',
+        'author': 'MaWenshui',
         'comments': '桌面便签应用',
         'keywords': 'sticky,note,便签,桌面',
     },
@@ -62,9 +62,9 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.4.0',
+    version='1.5.0',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
-    author='StickyNote Team',
+    author='MaWenshui',
     options={
         'build_exe': build_exe_options,
         'bdist_msi': bdist_msi_options,
