@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QTabWidget, QLabel, QComboBox, QCheckBox,
     QPushButton, QSpinBox, QLineEdit, QTextEdit, QFrame,
-    QFontComboBox, QWidget
+    QFontComboBox, QWidget, QProgressBar
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -263,10 +263,35 @@ class SettingsDialog(QDialog):
         manual_hint.setWordWrap(True)
         manual_layout.addWidget(manual_hint)
 
+        # 按钮区
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
         self.check_update_btn = QPushButton("\u7acb\u5373\u68c0\u67e5\u66f4\u65b0")
         self.check_update_btn.setFixedHeight(36)
         self.check_update_btn.clicked.connect(self.on_manual_check_update)
-        manual_layout.addWidget(self.check_update_btn)
+        btn_layout.addWidget(self.check_update_btn)
+
+        self.cancel_check_btn = QPushButton("\u53d6\u6d88\u68c0\u67e5")
+        self.cancel_check_btn.setFixedHeight(36)
+        self.cancel_check_btn.clicked.connect(self.on_cancel_check_update)
+        self.cancel_check_btn.setVisible(False)
+        self.cancel_check_btn.setStyleSheet(
+            'QPushButton { color: #e74c3c; border: 1px solid #e74c3c; border-radius: 4px; padding: 6px 16px; }'
+            'QPushButton:hover { background-color: #fde8e8; }'
+        )
+        btn_layout.addWidget(self.cancel_check_btn)
+        btn_layout.addStretch()
+
+        manual_layout.addLayout(btn_layout)
+
+        # 进度条（检查中显示）
+        self.check_progress_bar = QProgressBar()
+        self.check_progress_bar.setRange(0, 0)  # 不确定模式（来回滚动）
+        self.check_progress_bar.setFixedHeight(8)
+        self.check_progress_bar.setTextVisible(False)
+        self.check_progress_bar.setVisible(False)
+        manual_layout.addWidget(self.check_progress_bar)
 
         self.update_status_label = QLabel("")
         self.update_status_label.setStyleSheet("color: #4a86e8;")
@@ -285,7 +310,22 @@ class SettingsDialog(QDialog):
         self.manager.save_settings()
 
     def on_manual_check_update(self):
+        """手动触发检查更新"""
         self.check_update_btn.setEnabled(False)
         self.check_update_btn.setText("\u6b63\u5728\u68c0\u67e5...")
-        self.update_status_label.setText("")
+        self.cancel_check_btn.setVisible(True)
+        self.check_progress_bar.setVisible(True)
+        self.update_status_label.setText("\u6b63\u5728\u8fde\u63a5 GitHub...")
+        self.update_status_label.setStyleSheet("color: #4a86e8;")
         self.manager.check_for_updates(manual=True)
+
+    def on_cancel_check_update(self):
+        """取消检查更新"""
+        self.update_status_label.setText("\u6b63\u5728\u53d6\u6d88...")
+        self.update_status_label.setStyleSheet("color: #e67e22;")
+        self.cancel_check_btn.setEnabled(False)
+        self.manager.cancel_update_check()
+
+    def on_check_status_update(self, status_text):
+        """接收来自 UpdateChecker 的状态更新"""
+        self.update_status_label.setText(status_text)

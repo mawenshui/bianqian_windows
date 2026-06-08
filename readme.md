@@ -1,6 +1,6 @@
 # StickyNote 桌面便签应用程序
 
-**版本**: 1.5.0 | **最后更新**: 2026年6月
+**版本**: 1.5.1 | **最后更新**: 2026年6月
 
 欢迎使用 **StickyNote** 桌面便签应用程序！本应用基于 PyQt5 开发，提供丰富的便签管理功能，帮助您高效记录和管理日常事务、提醒和创意笔记。
 
@@ -411,7 +411,7 @@ bianqian_windows/
 ├── tags.json               # 标签数据
 ├── window_positions.json   # 窗口位置记录
 ├── core/                   # 核心模块
-│   ├── __init__.py         # 版本号 (1.3.1)
+│   ├── __init__.py         # 版本号 (1.5.1)
 │   ├── note.py             # 便签组件 + 异步I/O
 │   ├── manager.py          # 应用管理器
 │   └── settings.py         # 设置对话框
@@ -425,7 +425,14 @@ bianqian_windows/
 │   ├── reminder.py         # 定时提醒
 │   ├── tag.py              # 标签管理
 │   ├── import_export.py    # 导入导出
-│   └── template.py         # 便签模板
+│   ├── template.py         # 便签模板
+│   └── updater.py          # 自动更新
+├── tests/                  # 测试模块
+│   ├── test_manager_integration.py
+│   └── test_updater.py
+├── tools/                  # 工具脚本
+│   ├── generate_icon.py
+│   └── uninstall.ps1
 ├── notes/                  # 便签数据
 ├── backups/                # 备份文件
 ├── templates/              # 自定义模板

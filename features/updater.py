@@ -34,7 +34,7 @@ GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest
 # 下载超时（秒）
 GITHUB_DOWNLOAD_TIMEOUT = 60       # GitHub 主链接
 MIRROR_DOWNLOAD_TIMEOUT = 120      # 镜像备用链接（较慢）
-VERSION_CHECK_TIMEOUT = 15         # 版本检查请求
+VERSION_CHECK_TIMEOUT = 30         # 版本检查请求（国内网络较慢，延长至30秒）
 
 DOWNLOAD_CHUNK_SIZE = 128 * 1024   # 128KB
 
@@ -108,22 +108,38 @@ def get_download_urls(original_url):
 class UpdateChecker(QThread):
     """后台查询 GitHub 最新 Release 版本"""
     
+    status_update = pyqtSignal(str)   # 状态消息（用于进度展示）
     update_available = pyqtSignal(dict)
     no_update = pyqtSignal()
     check_failed = pyqtSignal(str)
     
-    def __init__(self, current_version):
+    def __init__(self, current_version, timeout=None):
         super().__init__()
         self._current_version = current_version
+        self._timeout = timeout or VERSION_CHECK_TIMEOUT
+        self._aborted = False
+    
+    def abort(self):
+        """取消检查（设置标志，线程会在下次检查时退出）"""
+        self._aborted = True
     
     def run(self):
         try:
+            self.status_update.emit('正在连接 GitHub...')
             req = urllib.request.Request(
                 GITHUB_API_LATEST,
                 headers={'Accept': 'application/vnd.github+json'}
             )
-            with urllib.request.urlopen(req, timeout=VERSION_CHECK_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                if self._aborted:
+                    self.check_failed.emit('检查已取消')
+                    return
+                self.status_update.emit('正在解析版本信息...')
                 data = json.loads(resp.read().decode())
+            
+            if self._aborted:
+                self.check_failed.emit('检查已取消')
+                return
             
             tag_name = data.get('tag_name', '')
             latest_version = parse_version(tag_name)
@@ -141,16 +157,24 @@ class UpdateChecker(QThread):
                 self.no_update.emit()
                 
         except (urllib.error.URLError, socket.timeout) as e:
-            self.check_failed.emit(f'网络连接失败: {e}')
+            if self._aborted:
+                self.check_failed.emit('检查已取消')
+            else:
+                self.check_failed.emit(f'网络连接失败: {e}')
         except urllib.error.HTTPError as e:
-            if e.code == 403:
+            if self._aborted:
+                self.check_failed.emit('检查已取消')
+            elif e.code == 403:
                 self.check_failed.emit('GitHub API 请求受限 (403)，请稍后重试')
             else:
                 self.check_failed.emit(f'服务器错误 (HTTP {e.code})')
         except json.JSONDecodeError:
             self.check_failed.emit('服务器返回数据格式异常')
         except Exception as e:
-            self.check_failed.emit(f'检查更新时发生未知错误: {e}')
+            if self._aborted:
+                self.check_failed.emit('检查已取消')
+            else:
+                self.check_failed.emit(f'检查更新时发生未知错误: {e}')
 
 
 # ==================== UpdateDownloader ====================

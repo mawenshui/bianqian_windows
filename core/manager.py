@@ -644,14 +644,25 @@ class StickyNoteManager:
         启动版本检查。
         
         Args:
-            manual: True = 用户手动触发，会显示"已是最新版本"提示
+            manual: True = 用户手动触发，会显示"已是最新版本"提示和进度反馈
         """
         self._update_manual = manual
         self._update_checker = UpdateChecker(__version__)
+        self._update_checker.status_update.connect(self._on_check_status_update)
         self._update_checker.update_available.connect(self._on_update_available)
         self._update_checker.no_update.connect(lambda: self._on_no_update(manual))
         self._update_checker.check_failed.connect(self._on_update_check_failed)
         self._update_checker.start()
+    
+    def cancel_update_check(self):
+        """取消正在进行的版本检查"""
+        if self._update_checker and self._update_checker.isRunning():
+            self._update_checker.abort()
+    
+    def _on_check_status_update(self, status_text):
+        """更新检查进度状态 — 转发给设置对话框"""
+        if self.settings_dialog and hasattr(self.settings_dialog, 'on_check_status_update'):
+            self.settings_dialog.on_check_status_update(status_text)
 
     def _on_update_available(self, update_info):
         # 检查是否已跳过此版本
@@ -679,6 +690,10 @@ class StickyNoteManager:
 
     def _on_no_update(self, manual=False):
         if manual:
+            if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
+                self.settings_dialog.update_status_label.setText("当前已是最新版本 ✓")
+                self.settings_dialog.update_status_label.setStyleSheet("color: #27ae60;")
+                self._last_check_status = "当前已是最新版本 ✓"
             QMessageBox.information(
                 None, '检查更新', '当前已是最新版本。'
             )
@@ -686,7 +701,13 @@ class StickyNoteManager:
 
     def _on_update_check_failed(self, error_msg):
         if hasattr(self, '_update_manual') and self._update_manual:
-            QMessageBox.warning(None, '检查更新失败', f'无法检查更新：\n{error_msg}')
+            if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
+                self.settings_dialog.update_status_label.setText(f"检查失败: {error_msg}")
+                self.settings_dialog.update_status_label.setStyleSheet("color: #e74c3c;")
+                self._last_check_status = f"检查失败: {error_msg}"
+            # 取消操作不弹错误框，直接恢复按钮
+            if '已取消' not in error_msg:
+                QMessageBox.warning(None, '检查更新失败', f'无法检查更新：\n{error_msg}')
         else:
             print(f'[更新] 自动检查失败: {error_msg}')
         self._restore_manual_check_btn()
@@ -696,6 +717,11 @@ class StickyNoteManager:
         if self.settings_dialog and hasattr(self.settings_dialog, 'check_update_btn'):
             self.settings_dialog.check_update_btn.setEnabled(True)
             self.settings_dialog.check_update_btn.setText("立即检查更新")
+            if hasattr(self.settings_dialog, 'cancel_check_btn'):
+                self.settings_dialog.cancel_check_btn.setVisible(False)
+                self.settings_dialog.cancel_check_btn.setEnabled(True)
+            if hasattr(self.settings_dialog, 'check_progress_bar'):
+                self.settings_dialog.check_progress_bar.setVisible(False)
             if hasattr(self, '_last_check_status'):
                 self.settings_dialog.update_status_label.setText(self._last_check_status)
 
