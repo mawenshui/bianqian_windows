@@ -212,7 +212,7 @@ class StickyNoteManager:
         self.tray_menu.addAction(settings_action)
 
         check_update_action = QAction("检查更新", self.app)
-        check_update_action.triggered.connect(lambda: self.check_for_updates(manual=True))
+        check_update_action.triggered.connect(lambda: self.check_for_updates(manual=True, source='tray'))
         self.tray_menu.addAction(check_update_action)
 
         help_action = QAction("帮助", self.app)
@@ -417,11 +417,11 @@ class StickyNoteManager:
 
     def show_help_dialog(self):
         """显示完整的帮助使用说明对话框"""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QLabel
 
         dialog = QDialog(None)
         dialog.setWindowTitle('桌面便签 — 完整使用说明')
-        dialog.setFixedSize(550, 500)
+        dialog.setFixedSize(550, 520)
         dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
 
         layout = QVBoxLayout()
@@ -430,8 +430,9 @@ class StickyNoteManager:
 
         help_text = QTextEdit()
         help_text.setReadOnly(True)
-        help_text.setHtml('''
+        help_text.setHtml(f'''
 <h2>📝 桌面便签 — 完整使用说明</h2>
+<p style="color:#888; font-size:10pt;">当前版本: v{__version__} | 作者: MaWenshui</p>
 
 <h3>📌 基本操作</h3>
 <ul>
@@ -489,6 +490,9 @@ class StickyNoteManager:
         layout.addWidget(help_text)
 
         btn_layout = QHBoxLayout()
+        version_label = QLabel(f'v{__version__}')
+        version_label.setStyleSheet('color: #999; font-size: 9pt;')
+        btn_layout.addWidget(version_label)
         btn_layout.addStretch()
         close_btn = QPushButton('关闭')
         close_btn.setFixedSize(80, 30)
@@ -640,14 +644,19 @@ class StickyNoteManager:
 
     # ==================== 更新流程 ====================
 
-    def check_for_updates(self, manual=False):
+    def check_for_updates(self, manual=False, source='auto'):
         """
         启动版本检查。
         
         Args:
-            manual: True = 用户手动触发，会显示"已是最新版本"提示和进度反馈
+            manual: True = 用户手动触发
+            source: 'auto' | 'tray' | 'settings' — 触发来源
+                    'auto'  → 不显示"已是最新"提示，检查 last_dismissed_version
+                    'tray'  → 模态对话框弹窗
+                    'settings' → 行内展示结果，不弹模态对话框
         """
         self._update_manual = manual
+        self._update_source = source
         self._update_checker = UpdateChecker(__version__)
         self._update_checker.status_update.connect(self._on_check_status_update)
         self._update_checker.update_available.connect(self._on_update_available)
@@ -659,6 +668,12 @@ class StickyNoteManager:
         """取消正在进行的版本检查"""
         if self._update_checker and self._update_checker.isRunning():
             self._update_checker.abort()
+
+    def _notify_settings_update_available(self, update_info):
+        """将更新信息转发到设置页面的行内展示区域（不弹模态对话框）"""
+        if self.settings_dialog and hasattr(self.settings_dialog, 'show_inline_update_info'):
+            self.settings_dialog.show_inline_update_info(update_info, __version__)
+        self._restore_manual_check_btn()
     
     def _on_check_status_update(self, status_text):
         """更新检查进度状态 — 转发给设置对话框"""
@@ -670,12 +685,23 @@ class StickyNoteManager:
         skip_version = self.settings.get('skip_version', '')
         if update_info['tag'] == skip_version:
             if self._update_manual:
-                # 手动检查时仍提示
-                pass
+                pass  # 手动检查时仍提示
             else:
                 return
 
-        # 显示更新对话框
+        # 自动检查：跳过上次"稍后提醒"过的版本
+        source = getattr(self, '_update_source', 'auto')
+        if source == 'auto':
+            last_dismissed = self.settings.get('last_dismissed_version', '')
+            if update_info['tag'] == last_dismissed:
+                return
+
+        # 设置页面来源：行内展示结果，不弹模态对话框
+        if source == 'settings':
+            self._notify_settings_update_available(update_info)
+            return
+
+        # 显示更新对话框（托盘菜单手动检查 / 自动检查首次提醒）
         dialog = UpdateDialog(update_info, __version__)
         dialog.exec_()
 
@@ -686,28 +712,39 @@ class StickyNoteManager:
             self.save_settings()
             self._restore_manual_check_btn()
         else:
-            # later - 什么都不做
+            # later — 持久化，自动检查不再提醒此版本
+            self.settings['last_dismissed_version'] = update_info['tag']
+            self.save_settings()
             self._restore_manual_check_btn()
 
     def _on_no_update(self, manual=False):
+        source = getattr(self, '_update_source', 'auto')
         if manual:
-            if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
-                self.settings_dialog.update_status_label.setText("当前已是最新版本 ✓")
-                self.settings_dialog.update_status_label.setStyleSheet("color: #27ae60;")
-                self._last_check_status = "当前已是最新版本 ✓"
-            QMessageBox.information(
-                None, '检查更新', '当前已是最新版本。'
-            )
+            if source == 'settings':
+                # 设置页面：仅更新状态标签，不弹窗
+                if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
+                    self.settings_dialog.update_status_label.setText("当前已是最新版本 ✓")
+                    self.settings_dialog.update_status_label.setStyleSheet("color: #27ae60;")
+                    self._last_check_status = "当前已是最新版本 ✓"
+            else:
+                if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
+                    self.settings_dialog.update_status_label.setText("当前已是最新版本 ✓")
+                    self.settings_dialog.update_status_label.setStyleSheet("color: #27ae60;")
+                    self._last_check_status = "当前已是最新版本 ✓"
+                QMessageBox.information(
+                    None, '检查更新', '当前已是最新版本。'
+                )
         self._restore_manual_check_btn()
 
     def _on_update_check_failed(self, error_msg):
         if hasattr(self, '_update_manual') and self._update_manual:
+            source = getattr(self, '_update_source', 'tray')
             if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
                 self.settings_dialog.update_status_label.setText(f"检查失败: {error_msg}")
                 self.settings_dialog.update_status_label.setStyleSheet("color: #e74c3c;")
                 self._last_check_status = f"检查失败: {error_msg}"
-            # 取消操作不弹错误框，直接恢复按钮
-            if '已取消' not in error_msg:
+            # 设置页面来源不弹错误框（行内已展示），取消操作也不弹
+            if '已取消' not in error_msg and source != 'settings':
                 QMessageBox.warning(None, '检查更新失败', f'无法检查更新：\n{error_msg}')
         else:
             print(f'[更新] 自动检查失败: {error_msg}')

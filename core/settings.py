@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 
-from core import get_styles_dir
+from core import get_styles_dir, __version__
 
 
 class SettingsDialog(QDialog):
@@ -59,7 +59,7 @@ class SettingsDialog(QDialog):
         main_layout = QVBoxLayout()
         main_layout.addWidget(tab_widget)
 
-        author_label = QLabel("By\uff1aMaWenshui")
+        author_label = QLabel(f"v{__version__} | By MaWenshui")
         author_label.setAlignment(Qt.AlignCenter)
         author_label.setStyleSheet("color: gray; font-size: 10pt;")
         main_layout.addWidget(author_label)
@@ -311,13 +311,16 @@ class SettingsDialog(QDialog):
 
     def on_manual_check_update(self):
         """手动触发检查更新"""
+        # 隐藏上次的行内更新结果
+        if hasattr(self, 'inline_update_group'):
+            self.inline_update_group.setVisible(False)
         self.check_update_btn.setEnabled(False)
         self.check_update_btn.setText("\u6b63\u5728\u68c0\u67e5...")
         self.cancel_check_btn.setVisible(True)
         self.check_progress_bar.setVisible(True)
         self.update_status_label.setText("\u6b63\u5728\u8fde\u63a5 GitHub...")
         self.update_status_label.setStyleSheet("color: #4a86e8;")
-        self.manager.check_for_updates(manual=True)
+        self.manager.check_for_updates(manual=True, source='settings')
 
     def on_cancel_check_update(self):
         """取消检查更新"""
@@ -329,3 +332,115 @@ class SettingsDialog(QDialog):
     def on_check_status_update(self, status_text):
         """接收来自 UpdateChecker 的状态更新"""
         self.update_status_label.setText(status_text)
+
+    def show_inline_update_info(self, update_info, current_version):
+        """
+        在设置页面的更新标签页内行内展示新版本信息（不弹模态对话框）。
+        
+        包含：版本号对比、更新日志、立即更新/稍后提醒/跳过按钮。
+        """
+        # 隐藏进度条和取消按钮
+        self.check_progress_bar.setVisible(False)
+        self.cancel_check_btn.setVisible(False)
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText("\u7acb\u5373\u68c0\u67e5\u66f4\u65b0")
+
+        # 确保 inline_update_group 存在
+        if not hasattr(self, 'inline_update_group'):
+            self._create_inline_update_widgets()
+
+        # 填充内容
+        self.inline_version_label.setText(
+            f'<h3 style="color:#27ae60;">🎉 发现新版本 v{update_info["version"]}</h3>'
+            f'<p>当前版本: <b>v{current_version}</b>  →  最新版本: <b>v{update_info["version"]}</b></p>'
+        )
+        body = update_info.get('body', '\u65e0\u8be6\u7ec6\u4fe1\u606f')
+        self.inline_changelog.setPlainText(body)
+
+        # 保存引用供按钮回调使用
+        self._inline_update_info = update_info
+
+        self.inline_update_group.setVisible(True)
+        self.update_status_label.setText("")
+
+    def _create_inline_update_widgets(self):
+        """创建行内更新信息展示控件（延迟创建，插入到按钮区域之后）"""
+        from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
+
+        self.inline_update_group = QGroupBox("\u65b0\u7248\u672c\u53ef\u7528")
+        inline_layout = QVBoxLayout()
+        inline_layout.setContentsMargins(12, 12, 12, 12)
+        inline_layout.setSpacing(8)
+
+        # 版本信息
+        self.inline_version_label = QLabel()
+        self.inline_version_label.setTextFormat(Qt.RichText)
+        self.inline_version_label.setWordWrap(True)
+        inline_layout.addWidget(self.inline_version_label)
+
+        # 更新日志
+        self.inline_changelog = QTextEdit()
+        self.inline_changelog.setReadOnly(True)
+        self.inline_changelog.setMaximumHeight(140)
+        inline_layout.addWidget(self.inline_changelog)
+
+        # 操作按钮
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        later_btn = QPushButton("\u7a0d\u540e\u63d0\u9192")
+        later_btn.clicked.connect(self._on_inline_later)
+        btn_row.addWidget(later_btn)
+
+        skip_btn = QPushButton("\u8df3\u8fc7\u6b64\u7248\u672c")
+        skip_btn.setStyleSheet('color: #888;')
+        skip_btn.clicked.connect(self._on_inline_skip)
+        btn_row.addWidget(skip_btn)
+
+        btn_row.addStretch()
+
+        update_btn = QPushButton("\u7acb\u5373\u66f4\u65b0")
+        update_btn.setStyleSheet(
+            'QPushButton { padding: 8px 24px; font-weight: bold; '
+            'background-color: #4a86e8; color: white; border-radius: 4px; }'
+            'QPushButton:hover { background-color: #3a76d8; }'
+        )
+        update_btn.clicked.connect(self._on_inline_update)
+        btn_row.addWidget(update_btn)
+
+        inline_layout.addLayout(btn_row)
+
+        self.inline_update_group.setLayout(inline_layout)
+        self.inline_update_group.setVisible(False)
+
+        # 插入到更新标签页布局的末尾（添加到 tab_widget 布局）
+        # 找到更新标签页的布局并添加
+        parent_tab = self.check_progress_bar.parent()  # 更新标签页的 widget
+        if parent_tab:
+            layout = parent_tab.layout()
+            if layout:
+                # 在 stretch 之前插入
+                layout.insertWidget(layout.count() - 1, self.inline_update_group)
+
+    def _on_inline_later(self):
+        """行内'稍后提醒'按钮"""
+        if hasattr(self, '_inline_update_info'):
+            self.manager.settings['last_dismissed_version'] = self._inline_update_info['tag']
+            self.manager.save_settings()
+        self.inline_update_group.setVisible(False)
+        self.update_status_label.setText("已设置为稍后提醒")
+        self.update_status_label.setStyleSheet("color: #888;")
+
+    def _on_inline_skip(self):
+        """行内'跳过此版本'按钮"""
+        if hasattr(self, '_inline_update_info'):
+            self.manager.settings['skip_version'] = self._inline_update_info['tag']
+            self.manager.save_settings()
+        self.inline_update_group.setVisible(False)
+        self.update_status_label.setText("已跳过此版本")
+        self.update_status_label.setStyleSheet("color: #888;")
+
+    def _on_inline_update(self):
+        """行内'立即更新'按钮"""
+        if hasattr(self, '_inline_update_info'):
+            self.manager._start_download_update(self._inline_update_info)

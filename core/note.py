@@ -24,7 +24,7 @@ from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit, UndoRedoManag
 from features.positioning import get_position_manager
 from features.formatter import ContentFormatter
 from features.tag import TagChipWidget
-from core import get_styles_dir
+from core import get_styles_dir, __version__
 
 # 窗口调整大小检测边界宽度
 RESIZE_MARGIN = 10
@@ -342,6 +342,13 @@ class StickyNote(QWidget):
         self.tags_layout.setContentsMargins(0, 2, 0, 2)
         self.tags_layout.setSpacing(4)
         self.tags_layout.addStretch()
+
+        # 版本标签（右下角淡色显示）
+        self.version_label = QLabel(f'v{__version__}')
+        self.version_label.setStyleSheet('color: #bbb; font-size: 7pt; background: transparent; border: none;')
+        self.version_label.setToolTip(f'StickyNote v{__version__} by MaWenshui')
+        self.tags_layout.addWidget(self.version_label)
+
         main_layout.addLayout(self.tags_layout)
 
         self.setLayout(main_layout)

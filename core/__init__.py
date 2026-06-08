@@ -46,10 +46,10 @@ def get_user_data_dir():
         return os.getcwd()
 
 
+__version__ = '1.5.4'
+__author__ = 'MaWenshui'
+
 from core.note import StickyNote, PlainLineEdit, PlainTextEdit, NoteSaveWorker, NoteLoadWorker, RESIZE_MARGIN
 from core.settings import SettingsDialog
-
-__version__ = '1.5.3'
-__author__ = 'MaWenshui'
 
 from core.manager import StickyNoteManager
