@@ -56,6 +56,7 @@
 - 📌 **窗口吸附** — 屏幕边缘吸附 + 便签间对齐
 - ✨ **淡入淡出动画** — 窗口显示/隐藏平滑过渡
 - ⚡ **异步I/O** — 后台线程保存/加载，主界面不卡顿
+- 🔄 **自动更新** — GitHub Release 检测新版本，支持 MSI 和便携版自动更新
 
 ---
 
@@ -69,15 +70,25 @@
 
 ## 安装与启动
 
-### 安装依赖
+### 方式一：MSI 安装包（推荐）
+
+从 [GitHub Releases](https://github.com/mawenshui/bianqian_windows/releases) 下载最新 `StickyNote-*-win64.msi`，双击安装即可。
+
+- 自动创建桌面快捷方式和开始菜单条目
+- 支持覆盖安装（无需先卸载旧版本）
+- 数据存储在安装目录 `StickyNote/` 子目录下
+
+### 方式二：便携版 ZIP
+
+从 [GitHub Releases](https://github.com/mawenshui/bianqian_windows/releases) 下载 `StickyNote-*-portable.zip`，解压到任意目录，双击 `StickyNote.exe` 运行。
+
+- 无需安装，解压即用
+- 所有数据与 exe 同目录存放
+
+### 方式三：Python 源码运行
 
 ```bash
 pip install PyQt5
-```
-
-### 启动应用程序
-
-```bash
 python main.py
 ```
 
@@ -259,6 +270,16 @@ python main.py
 - **自动备份**：程序默认启用自动备份，按配置间隔执行
 - **备份恢复**：选择备份文件恢复数据
 - **备份清理**：自动保留最近的备份，删除旧文件
+
+### 自动更新
+
+程序启动时自动检查 GitHub Release 是否有新版本。
+
+- **检查方式**：对比本地版本号与 GitHub 最新 Release 的 tag
+- **更新提示**：发现新版本时系统托盘弹出通知，点击可跳转下载页面
+- **防重复**：同一版本每天只提示一次，避免骚扰
+- **容灾降级**：GitHub API 不可用时自动跳过，不影响正常使用
+- **手动检查**：托盘菜单 → "检查更新"
 
 ---
 
