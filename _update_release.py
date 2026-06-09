@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-更新 GitHub Release v1.5.5 的资源文件
+更新 GitHub Release v1.6.0 的资源文件
 用法: python _update_release.py <GITHUB_TOKEN>
 """
 import sys
@@ -9,12 +9,12 @@ import urllib.request
 import json
 
 REPO = 'mawenshui/bianqian_windows'
-TAG = 'v1.5.5'
+TAG = 'v1.6.0'
 
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dist')
 FILES = [
-    'StickyNote-1.5.5-win64.msi',
-    'StickyNote-v1.5.5-portable.zip',
+    'StickyNote-1.6.0-win64.msi',
+    'StickyNote-v1.6.0-portable.zip',
 ]
 
 def get_token():
