@@ -90,11 +90,18 @@ bdist_msi_options = {
             ('A_APPEND_STICKYNOTE_DIR', 'NOT Installed', 1235),
         ],
 
-        # --- 桌面快捷方式：组件 + 快捷方式 + 功能绑定 ---
+        # --- 桌面快捷方式：组件 + 注册表KeyPath + 快捷方式 + 功能绑定 ---
         'Component': [
             # 条件化组件：仅当 DESKTOPSHORTCUT=1 时安装
-            # KeyPath 留空——无文件关联，靠 Condition 控制安装
-            ('DesktopShortcut', '{B8C2D4E6-F1A3-5B7D-9E0F-2A4C6D8E0F1A}', 'DesktopFolder', 0, 'DESKTOPSHORTCUT', ''),
+            # Attributes=4 (RegistryKeyPath): KeyPath 指向注册表项
+            ('DesktopShortcut', '{B8C2D4E6-F1A3-5B7D-9E0F-2A4C6D8E0F1A}', 'DesktopFolder', 4, 'DESKTOPSHORTCUT', 'DesktopShortcutReg'),
+        ],
+        'Registry': [
+            # Registry, Root, Key, Name, Value, Component_
+            # Root=1 (HKCR); 注册表项作为组件 KeyPath，卸载时自动清理
+            ('DesktopShortcutReg', 1,
+             'Software\\StickyNote\\DesktopShortcut',
+             'Installed', '1', 'DesktopShortcut'),
         ],
         'Shortcut': [
             # Shortcut, Directory_, Name, Component_, Target, Arguments, Description, Hotkey, Icon_, IconIndex, ShowCmd, WkDir

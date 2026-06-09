@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-MSI 后处理：中文化界面文本 + ProductLanguage
-通过 msilib Modify API 覆写 Control 表文本
+MSI 后处理：
+1. 补入 DesktopFolder 到 Directory 表（修复 Error 2727）
+2. 中文化界面文本 + ProductLanguage
 """
 import msilib
 import sys
@@ -100,9 +101,32 @@ def _update_control_text(db, dialog, control, new_text):
         print(f'  [SKIP] {dialog}.{control} (not found)')
 
 
+def _ensure_desktop_folder(db):
+    """确保 DesktopFolder 存在于 Directory 表中（修复 MSI Error 2727）"""
+    view = db.OpenView("SELECT Directory FROM Directory WHERE Directory = 'DesktopFolder'")
+    view.Execute(None)
+    rec = view.Fetch()
+    view.Close()
+    if rec:
+        print('  [OK] DesktopFolder already exists in Directory table')
+        return
+    # 插入 DesktopFolder 行：父目录为 TARGETDIR，DefaultDir 使用标准名称
+    view = db.OpenView(
+        "INSERT INTO Directory (Directory, Directory_Parent, DefaultDir) "
+        "VALUES ('DesktopFolder', 'TARGETDIR', 'DESKTOP|Desktop')"
+    )
+    view.Execute(None)
+    view.Close()
+    print('  [OK] DesktopFolder inserted into Directory table')
+
+
 def main():
     print(f'Patching: {MSI_PATH}')
     db = msilib.OpenDatabase(MSI_PATH, msilib.MSIDBOPEN_DIRECT)
+
+    # 0. 补入 DesktopFolder（修复 Error 2727）
+    print('\n--- Directory table fix ---')
+    _ensure_desktop_folder(db)
 
     # 1. 覆写 Property
     print('\n--- Property overrides ---')
