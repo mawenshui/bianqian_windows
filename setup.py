@@ -93,7 +93,8 @@ bdist_msi_options = {
         # --- 桌面快捷方式：组件 + 快捷方式 + 功能绑定 ---
         'Component': [
             # 条件化组件：仅当 DESKTOPSHORTCUT=1 时安装
-            ('DesktopShortcut', 'DesktopShortcut', 'DesktopFolder', 0, 'DESKTOPSHORTCUT', 'DesktopShortcut'),
+            # KeyPath 留空——无文件关联，靠 Condition 控制安装
+            ('DesktopShortcut', '{B8C2D4E6-F1A3-5B7D-9E0F-2A4C6D8E0F1A}', 'DesktopFolder', 0, 'DESKTOPSHORTCUT', ''),
         ],
         'Shortcut': [
             # Shortcut, Directory_, Name, Component_, Target, Arguments, Description, Hotkey, Icon_, IconIndex, ShowCmd, WkDir
