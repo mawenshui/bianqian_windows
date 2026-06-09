@@ -42,7 +42,10 @@ def api_request(method, url, token, data=None, content_type=None):
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+            body = resp.read()
+            if not body:
+                return {}
+            return json.loads(body)
     except urllib.error.HTTPError as e:
         err = json.loads(e.read())
         print(f'  HTTP {e.code}: {err.get("message", str(e))}')
