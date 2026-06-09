@@ -457,10 +457,15 @@ if errorlevel 1 (
 echo [%date% %time%] ZIP extraction complete. >> "%LOGFILE%"
 
 :: ===== Step 3: Find extracted source directory =====
+:: 优先检测扁平结构（StickyNote.exe 直接在解压目录下）
 set SRC_DIR=%EXTRACT_DIR%
-for /d %%d in ("%EXTRACT_DIR%\\*") do (
-    set SRC_DIR=%%d
-    goto :found_src
+if exist "%EXTRACT_DIR%\StickyNote.exe" goto :found_src
+:: 否则查找子目录中的 StickyNote.exe（兼容带根文件夹的 ZIP）
+for /d %%d in ("%EXTRACT_DIR%\*") do (
+    if exist "%%d\StickyNote.exe" (
+        set SRC_DIR=%%d
+        goto :found_src
+    )
 )
 :found_src
 echo [%date% %time%] Source directory: %SRC_DIR% >> "%LOGFILE%"

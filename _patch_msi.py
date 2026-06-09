@@ -1,63 +1,65 @@
 # -*- coding: utf-8 -*-
 """
-MSI 后处理脚本 — 中文化
-在 cx_Freeze bdist_msi 生成 MSI 后运行，覆写已有表数据。
-使用 msilib Modify API（非原始 SQL）确保兼容性。
+MSI 后处理：中文化界面文本 + ProductLanguage
+通过 msilib Modify API 覆写 Control 表文本
 """
 import msilib
 import sys
-import os
 
+MSI_PATH = sys.argv[1] if len(sys.argv) > 1 else r'dist\StickyNote-1.5.5-win64.msi'
 
-def _update_field(db, table, primary_keys, column, new_value):
-    """使用 msilib Modify API 更新表中某行的某个字段。
-    
-    primary_keys: list of (col_name, key_value) pairs
-    """
-    cols = [pk[0] for pk in primary_keys]
-    vals = [pk[1] for pk in primary_keys]
-    
-    where_clause = ' AND '.join(f"`{c}` = '{v.replace(chr(39), chr(39)+chr(39))}'" for c, v in primary_keys)
-    sql = f"SELECT * FROM `{table}` WHERE {where_clause}"
-    view = db.OpenView(sql)
-    # Execute with a parameter record
-    rec_params = msilib.CreateRecord(len(cols))
-    for i, v in enumerate(vals):
-        rec_params.SetString(i + 1, v)
-    view.Execute(rec_params)
-    
-    rec = view.Fetch()
-    if rec is None:
-        view.Close()
-        return False
-    
-    # Find the column index
-    # We need to figure out which column number this is.
-    # Let's get column names from the view.
-    col_info = view.GetColumnInfo(msilib.MSICOLINFO_NAMES)
-    rec_cols = msilib.CreateRecord(col_info.GetFieldCount())
-    # Actually, we can just use the column name to find the index
-    # The SELECT * returns columns in schema order.
-    # For Control table: Dialog_, Control, Type, X, Y, Width, Height, Attributes, Property, Text, Control_Next, Help
-    # For Property table: Property, Value
-    
-    # Simpler approach: use specific SELECT to get just the targeted column
-    view.Close()
-    
-    # Re-open with a targeted SELECT
-    sql2 = f"SELECT `{column}` FROM `{table}` WHERE {where_clause}"
-    view2 = db.OpenView(sql2)
-    view2.Execute(rec_params)
-    
-    rec2 = view2.Fetch()
-    if rec2 is None:
-        view2.Close()
-        return False
-    
-    rec2.SetString(1, new_value)
-    view2.Modify(msilib.MSIMODIFY_REPLACE, rec2)
-    view2.Close()
-    return True
+# ── 中文覆写表：{(Dialog_, Control): 新文本} ──
+OVERRIDES = {
+    # ExitDialog
+    ('ExitDialog', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}桌面便签 安装完成',
+    ('ExitDialog', 'Description'):              '桌面便签安装程序已成功完成。\r\n点击"完成"退出安装向导。',
+    # PrepareDlg
+    ('PrepareDlg', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}准备安装',
+    ('PrepareDlg', 'Description'):              '安装程序已准备就绪，即将开始安装桌面便签。\r\n点击"安装"继续。',
+    # SelectDirectoryDlg
+    ('SelectDirectoryDlg', 'Title'):            '{\\VSI_MS_Sans_Serif13.0_0_0}选择安装位置',
+    ('SelectDirectoryDlg', 'Description'):      '请选择桌面便签的安装文件夹。',
+    # ProgressDlg
+    ('ProgressDlg', 'Title'):                   '{\\VSI_MS_Sans_Serif13.0_0_0}正在安装',
+    ('ProgressDlg', 'Text'):                    '安装程序正在安装桌面便签，请稍候...',
+    ('ProgressDlg', 'Description'):             '请稍候，安装程序正在安装桌面便签。这可能需要几分钟时间。',
+    # CancelDlg
+    ('CancelDlg', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}取消安装',
+    ('CancelDlg', 'Text'):                     '是否确定取消桌面便签的安装？',
+    # FilesInUse
+    ('FilesInUse', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}文件正在使用',
+    ('FilesInUse', 'Description'):              '以下应用程序正在使用需要更新的文件。请关闭这些应用程序，然后点击"重试"继续。',
+    # MaintenanceTypeDlg
+    ('MaintenanceTypeDlg', 'Title'):            '{\\VSI_MS_Sans_Serif13.0_0_0}维护桌面便签',
+    ('MaintenanceTypeDlg', 'Description'):      '选择要执行的操作。',
+    # WaitForCostingDlg
+    ('WaitForCostingDlg', 'Title'):             '{\\VSI_MS_Sans_Serif13.0_0_0}正在计算空间需求',
+    ('WaitForCostingDlg', 'Description'):       '请稍候，安装程序正在计算磁盘空间需求。',
+    # UserExit
+    ('UserExit', 'Title'):                      '{\\VSI_MS_Sans_Serif13.0_0_0}安装已取消',
+    ('UserExit', 'Description'):                '桌面便签安装程序已取消。\r\n点击"完成"退出安装向导。',
+    # FatalError
+    ('FatalError', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}安装失败',
+    ('FatalError', 'Description'):              '桌面便签安装程序未能完成安装。\r\n点击"完成"退出安装向导。',
+    # ResumeDlg / MaintenanceWelcomeDlg
+    ('ResumeDlg', 'Title'):                     '{\\VSI_MS_Sans_Serif13.0_0_0}恢复安装',
+    ('ResumeDlg', 'Description'):               '安装程序将恢复桌面便签的安装。',
+    ('MaintenanceWelcomeDlg', 'Title'):         '{\\VSI_MS_Sans_Serif13.0_0_0}欢迎使用桌面便签维护程序',
+    ('MaintenanceWelcomeDlg', 'Description'):   '选择要执行的操作：修复或删除桌面便签。',
+    # WelcomeDlg
+    ('WelcomeDlg', 'Title'):                    '{\\VSI_MS_Sans_Serif13.0_0_0}欢迎使用桌面便签安装向导',
+    ('WelcomeDlg', 'Description'):              '此向导将引导您完成桌面便签的安装。\r\n\r\n建议在继续安装之前关闭所有其他应用程序。',
+    # VerifyReadyDlg
+    ('VerifyReadyDlg', 'Title'):                '{\\VSI_MS_Sans_Serif13.0_0_0}准备安装桌面便签',
+    ('VerifyReadyDlg', 'Description'):          '安装程序已准备就绪。点击"安装"开始安装。',
+}
+
+# ── Property 覆写 ──
+PROPERTY_OVERRIDES = {
+    'ProductLanguage': '2052',
+    # Manufacturer / ProductName 等也可以在这里覆写
+    # 'Manufacturer': 'MaWenshui',
+}
 
 
 def _update_property(db, prop_name, new_value):
@@ -68,12 +70,22 @@ def _update_property(db, prop_name, new_value):
     if rec:
         rec.SetString(1, new_value)
         view.Modify(msilib.MSIMODIFY_REPLACE, rec)
-        print(f'  Property.{prop_name} := {new_value}')
-    view.Close()
+        view.Close()
+        print(f'  [OK] Property.{prop_name} = {new_value}')
+    else:
+        view.Close()
+        # 插入新行
+        view2 = db.OpenView("INSERT INTO Property (Property, Value) VALUES (?, ?)")
+        rec2 = msilib.CreateRecord(2)
+        rec2.SetString(1, prop_name)
+        rec2.SetString(2, new_value)
+        view2.Execute(rec2)
+        view2.Close()
+        print(f'  [OK] Property.{prop_name} = {new_value} (inserted)')
 
 
 def _update_control_text(db, dialog, control, new_text):
-    """更新 Control 表的 Text 字段"""
+    """更新 Control 表的 Text 列"""
     sql = f"SELECT Text FROM Control WHERE Dialog_ = '{dialog}' AND Control = '{control}'"
     view = db.OpenView(sql)
     view.Execute(None)
@@ -81,110 +93,31 @@ def _update_control_text(db, dialog, control, new_text):
     if rec:
         rec.SetString(1, new_text)
         view.Modify(msilib.MSIMODIFY_REPLACE, rec)
-    view.Close()
+        view.Close()
+        print(f'  [OK] {dialog}.{control}')
+    else:
+        view.Close()
+        print(f'  [SKIP] {dialog}.{control} (not found)')
 
 
-def patch_msi(msi_path):
-    db = msilib.OpenDatabase(msi_path, msilib.MSIDBOPEN_DIRECT)
+def main():
+    print(f'Patching: {MSI_PATH}')
+    db = msilib.OpenDatabase(MSI_PATH, msilib.MSIDBOPEN_DIRECT)
 
-    # 1. ProductLanguage: 1033 → 2052
-    _update_property(db, 'ProductLanguage', '2052')
+    # 1. 覆写 Property
+    print('\n--- Property overrides ---')
+    for prop_name, new_value in PROPERTY_OVERRIDES.items():
+        _update_property(db, prop_name, new_value)
 
     # 2. 覆写 Control 文本
-    control_overrides = {
-        # ExitDialog
-        ('ExitDialog', 'Description'):    '点击"完成"按钮退出安装程序。',
-        ('ExitDialog', 'Title'):          '{\\VerdanaBold10}完成 [ProductName] 安装向导',
-        ('ExitDialog', 'LaunchOnFinish'): '安装完成后运行程序(&L)',
-
-        # PrepareDlg
-        ('PrepareDlg', 'Description'):    '请稍候，安装程序正在准备引导您完成安装。',
-
-        # SelectDirectoryDlg
-        ('SelectDirectoryDlg', 'Description'): '请选择 [ProductName] 的安装文件夹。',
-        ('SelectDirectoryDlg', 'Title'):        '{\\DlgFontBold8}选择安装位置',
-
-        # ProgressDlg
-        ('ProgressDlg', 'Title'):         '{\\DlgFontBold8}[Progress1] [ProductName]',
-        ('ProgressDlg', 'Text'):          '请稍候，安装程序正在[Progress2] [ProductName]。',
-        ('ProgressDlg', 'ActionText'):    '准备中...',
-        ('ProgressDlg', 'StatusLabel'):   '状态:',
-
-        # CancelDlg
-        ('CancelDlg', 'Text'):            '确定要取消 [ProductName] 安装吗？',
-
-        # FilesInUse
-        ('FilesInUse', 'Description'):    '部分需要更新的文件正在使用中。',
-        ('FilesInUse', 'Text'):           '以下应用程序正在使用需要由此安装程序更新的文件。建议关闭这些应用程序。',
-        ('FilesInUse', 'Title'):          '{\\DlgFontBold8}文件正在使用',
-
-        # MaintenanceTypeDlg
-        ('MaintenanceTypeDlg', 'Title'):     '{\\DlgFontBold8}更改、修复或删除安装',
-        ('MaintenanceTypeDlg', 'BodyText'):  '选择是要修复还是删除 [ProductName]。',
-
-        # WaitForCostingDlg
-        ('WaitForCostingDlg', 'Text'):    '请稍候，安装程序正在计算磁盘空间需求...',
-
-        # UserExit
-        ('UserExit', 'Title'):            '{\\VerdanaBold10}[ProductName] 安装已中断',
-        ('UserExit', 'Description1'):     '[ProductName] 安装已中断。系统未被修改。要稍后安装此程序，请重新运行安装程序。',
-        ('UserExit', 'Description2'):     '点击"完成"按钮退出安装程序。',
-
-        # FatalError
-        ('FatalError', 'Title'):          '{\\VerdanaBold10}[ProductName] 安装程序提前结束',
-        ('FatalError', 'Description1'):   '[ProductName] 安装因错误提前结束。系统未被修改。',
-        ('FatalError', 'Description2'):   '点击"完成"按钮退出安装程序。',
-    }
-
-    for (dialog, control), text in control_overrides.items():
-        _update_control_text(db, dialog, control, text)
-
-    # 3. 补充 UIText
-    existing_keys = set()
-    view = db.OpenView("SELECT `Key` FROM UIText")
-    view.Execute(None)
-    while True:
-        rec = view.Fetch()
-        if not rec:
-            break
-        existing_keys.add(rec.GetString(1))
-    view.Close()
-
-    extra_uitext = {
-        'AbsentPath':           '文件夹 [2] 不存在或无法访问。是否继续？',
-        'SelParentCostNegNeg':  '由于磁盘空间不足，无法将此功能安装到所选位置。请释放额外的磁盘空间或选择其他位置。',
-        'VolumeCostAvailable':  '可用磁盘空间',
-        'VolumeCostDifference': '所需磁盘空间',
-        'VolumeCostRequired':   '所需磁盘空间',
-        'VolumeCostSize':       '磁盘空间',
-        'VolumeCostVolume':     '磁盘',
-    }
-
-    for key, text in extra_uitext.items():
-        if key not in existing_keys:
-            v = db.OpenView("SELECT * FROM `UIText`")
-            rec = msilib.CreateRecord(2)
-            rec.SetString(1, key)
-            rec.SetString(2, text)
-            v.Modify(msilib.MSIMODIFY_INSERT, rec)
-            v.Close()
+    print('\n--- Control text overrides ---')
+    for (dialog, control), new_text in OVERRIDES.items():
+        _update_control_text(db, dialog, control, new_text)
 
     db.Commit()
     db.Close()
-    print(f'  OK MSI patch applied: {msi_path}')
+    print('\n✅ MSI patching complete.')
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        target = sys.argv[1]
-    else:
-        target = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'dist',
-            'StickyNote-1.5.5-win64.msi'
-        )
-    if os.path.exists(target):
-        patch_msi(target)
-    else:
-        print(f'  ! MSI not found: {target}')
-        sys.exit(1)
+    main()
