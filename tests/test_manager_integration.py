@@ -28,43 +28,46 @@ if _app is None:
 
 
 class TestManagerUpdateHelper(unittest.TestCase):
-    """测试 Manager 更新辅助方法（不需要完整 Manager 实例）"""
+    """测试 Manager 更新辅助方法（不需要完整 Manager 实例）
+    
+    注意：_match_asset 当前返回 (zip_asset, msi_asset_or_none) 元组，
+    并优先匹配 .zip 资产。
+    """
 
     def test_match_asset_msi_preferred(self):
-        """_match_asset: MSI 模式下优先匹配 .msi"""
-        # 惰性导入以模拟安装类型
+        """_match_asset: MSI 模式下返回 .zip 为主资产 + .msi 为副资产"""
         from core.manager import StickyNoteManager
-        from features.updater import detect_install_type
 
         assets = [
-            {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe'},
+            {'name': 'StickyNote.zip', 'browser_download_url': 'https://x.com/e.zip'},
             {'name': 'StickyNote.msi', 'browser_download_url': 'https://x.com/e.msi'},
         ]
 
-        # 模拟 manager 实例
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
 
-        result = mgr._match_asset(assets, 'msi')
-        self.assertEqual(result['name'], 'StickyNote.msi')
+        zip_asset, msi_asset = mgr._match_asset(assets, 'msi')
+        self.assertEqual(zip_asset['name'], 'StickyNote.zip')
+        self.assertEqual(msi_asset['name'], 'StickyNote.msi')
 
-    def test_match_asset_portable_prefers_exe(self):
-        """_match_asset: portable 模式优先匹配 .exe"""
+    def test_match_asset_portable_prefers_zip(self):
+        """_match_asset: portable 模式只返回 .zip，不返回 .msi"""
         from core.manager import StickyNoteManager
 
         assets = [
             {'name': 'StickyNote.msi', 'browser_download_url': 'https://x.com/e.msi'},
-            {'name': 'StickyNote.exe', 'browser_download_url': 'https://x.com/e.exe'},
+            {'name': 'StickyNote.zip', 'browser_download_url': 'https://x.com/e.zip'},
         ]
 
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
 
-        result = mgr._match_asset(assets, 'portable')
-        self.assertEqual(result['name'], 'StickyNote.exe')
+        zip_asset, msi_asset = mgr._match_asset(assets, 'portable')
+        self.assertEqual(zip_asset['name'], 'StickyNote.zip')
+        self.assertIsNone(msi_asset)
 
-    def test_match_asset_only_exe_available(self):
-        """_match_asset: MSI 模式但只有 .exe，应回退到 .exe"""
+    def test_match_asset_only_exe_no_zip(self):
+        """_match_asset: 只有 .exe 无 .zip → 返回 (None, None)"""
         from core.manager import StickyNoteManager
 
         assets = [
@@ -74,33 +77,35 @@ class TestManagerUpdateHelper(unittest.TestCase):
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
 
-        result = mgr._match_asset(assets, 'msi')
-        self.assertEqual(result['name'], 'StickyNote.exe')
+        zip_asset, msi_asset = mgr._match_asset(assets, 'msi')
+        self.assertIsNone(zip_asset)
+        self.assertIsNone(msi_asset)
 
     def test_match_asset_empty_list(self):
-        """_match_asset: 空资产列表返回 None"""
+        """_match_asset: 空资产列表返回 (None, None)"""
         from core.manager import StickyNoteManager
 
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
 
-        result = mgr._match_asset([], 'portable')
-        self.assertIsNone(result)
+        zip_asset, msi_asset = mgr._match_asset([], 'portable')
+        self.assertIsNone(zip_asset)
+        self.assertIsNone(msi_asset)
 
-    def test_match_asset_multiple_exe(self):
-        """_match_asset: 多个 .exe 时返回第一个"""
+    def test_match_asset_multiple_zip(self):
+        """_match_asset: 多个 .zip 时返回最后一个"""
         from core.manager import StickyNoteManager
 
         assets = [
-            {'name': 'StickyNote-x64.exe', 'browser_download_url': 'https://x.com/1'},
-            {'name': 'StickyNote-x86.exe', 'browser_download_url': 'https://x.com/2'},
+            {'name': 'StickyNote-x64.zip', 'browser_download_url': 'https://x.com/1'},
+            {'name': 'StickyNote-x86.zip', 'browser_download_url': 'https://x.com/2'},
         ]
 
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
 
-        result = mgr._match_asset(assets, 'portable')
-        self.assertEqual(result['name'], 'StickyNote-x64.exe')
+        zip_asset, msi_asset = mgr._match_asset(assets, 'portable')
+        self.assertEqual(zip_asset['name'], 'StickyNote-x86.zip')
 
 
 class TestUpdateFlowWithMock(unittest.TestCase):
@@ -162,6 +167,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
 
             mgr = StickyNoteManager.__new__(StickyNoteManager)
             mgr.settings = {'skip_version': 'v1.4.0'}
+            mgr.settings_dialog = None
             mgr._update_manual = True
             mgr._start_download_update = MagicMock()
             mgr._restore_manual_check_btn = MagicMock()
@@ -175,7 +181,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mgr._on_update_available(self.update_info)
 
             # 手动检查时仍应创建对话框
-            mock_dialog_cls.assert_called_once_with(self.update_info, '1.3.1')
+            mock_dialog_cls.assert_called_once_with(self.update_info, '1.6.1')
 
     def test_no_update_manual_shows_message(self):
         """手动检查无更新时显示提示"""
@@ -184,6 +190,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
              patch('core.manager.QMessageBox.information') as mock_info:
 
             mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr.settings_dialog = None
             mgr._update_manual = True
             mgr._restore_manual_check_btn = MagicMock()
 
@@ -210,6 +217,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
              patch('core.manager.QMessageBox.warning') as mock_warn:
 
             mgr = StickyNoteManager.__new__(StickyNoteManager)
+            mgr.settings_dialog = None
             mgr._update_manual = True
             mgr._restore_manual_check_btn = MagicMock()
 
@@ -242,20 +250,20 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mock_warn.assert_called_once()
 
     def test_match_asset_fallback(self):
-        """_match_asset 在无标准格式(.msi/.exe)时回退到首个资产"""
+        """_match_asset: .zip 文件被正确匹配为主资产"""
         from core.manager import StickyNoteManager
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
-            # 只有 .zip 文件，应回退到 assets[0]
-            result = mgr._match_asset(
+            zip_asset, msi_asset = mgr._match_asset(
                 [{'name': 'source.zip', 'url': 'https://x.com/s.zip'}],
                 'portable'
             )
-            self.assertIsNotNone(result)
-            self.assertEqual(result['name'], 'source.zip')
+            self.assertIsNotNone(zip_asset)
+            self.assertEqual(zip_asset['name'], 'source.zip')
+            self.assertIsNone(msi_asset)
 
-    def test_match_asset_prefers_msi(self):
-        """_match_asset MSI模式下优先匹配.msi"""
+    def test_match_asset_no_zip_returns_none(self):
+        """_match_asset: 无 .zip 资产时返回 (None, None)"""
         from core.manager import StickyNoteManager
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
@@ -263,11 +271,12 @@ class TestUpdateFlowWithMock(unittest.TestCase):
                 {'name': 'app.exe', 'url': 'https://x.com/app.exe'},
                 {'name': 'app.msi', 'url': 'https://x.com/app.msi'},
             ]
-            result = mgr._match_asset(assets, 'msi')
-            self.assertEqual(result['name'], 'app.msi')
+            zip_asset, msi_asset = mgr._match_asset(assets, 'msi')
+            self.assertIsNone(zip_asset)
+            self.assertIsNone(msi_asset)
 
-    def test_match_asset_prefers_exe_portable(self):
-        """_match_asset portable模式下优先匹配.exe"""
+    def test_match_asset_zip_only(self):
+        """_match_asset: portable 模式下 .zip 被匹配为主资产"""
         from core.manager import StickyNoteManager
         with patch('core.manager.StickyNoteManager.__init__', return_value=None):
             mgr = StickyNoteManager.__new__(StickyNoteManager)
@@ -275,8 +284,9 @@ class TestUpdateFlowWithMock(unittest.TestCase):
                 {'name': 'source.zip', 'url': 'https://x.com/s.zip'},
                 {'name': 'app.exe', 'url': 'https://x.com/app.exe'},
             ]
-            result = mgr._match_asset(assets, 'portable')
-            self.assertEqual(result['name'], 'app.exe')
+            zip_asset, msi_asset = mgr._match_asset(assets, 'portable')
+            self.assertEqual(zip_asset['name'], 'source.zip')
+            self.assertIsNone(msi_asset)
 
 
 class TestSettingsUpdateTab(unittest.TestCase):

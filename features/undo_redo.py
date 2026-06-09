@@ -114,6 +114,8 @@ class UndoRedoManager(QObject):
         
         # 限制历史记录长度
         if len(self.history) > self.max_history:
+            # pop(0) 移除最旧条目后，所有索引前移 1 位
+            # append 前 current_index 指向末尾，append+pop 后仍指向末尾，无需 +1
             self.history.pop(0)
         else:
             self.current_index += 1

@@ -373,30 +373,87 @@ class WindowPositionManager:
             try:
                 with open(self.position_history_file, 'r', encoding='utf-8') as f:
                     raw_data = json.load(f)
+                
+                if not isinstance(raw_data, dict):
+                    print("位置历史文件格式错误，已重置")
+                    return {}
+                
                 # JSON key 都是字符串，转换为 int 以保持与 note_id 类型一致
+                # 同时校验每条记录的数据结构，跳过无效条目
                 result = {}
                 for k, v in raw_data.items():
+                    if not isinstance(v, dict) or 'x' not in v or 'y' not in v:
+                        print(f"跳过无效的位置记录: key={k}")
+                        continue
                     try:
                         result[int(k)] = v
                     except (ValueError, TypeError):
                         result[k] = v
+                
+                # 回写清理后的数据（去除无效条目）
+                if len(result) != len(raw_data):
+                    self.position_history = result
+                    self.save_position_history()
+                
                 return result
+            except json.JSONDecodeError as e:
+                print(f"位置历史文件 JSON 解析失败，已重置: {e}")
+                self._backup_corrupt_file()
             except Exception as e:
                 print(f"加载位置历史时出错: {e}")
         
         return {}
     
+    def _backup_corrupt_file(self):
+        """
+        备份损坏的位置历史文件，避免数据彻底丢失
+        """
+        try:
+            if os.path.exists(self.position_history_file):
+                backup_path = self.position_history_file + '.bak'
+                import shutil
+                shutil.copy2(self.position_history_file, backup_path)
+                print(f"已备份损坏的位置历史到: {backup_path}")
+        except Exception as e:
+            print(f"备份位置历史文件失败: {e}")
+    
     def save_position_history(self):
         """
         保存位置历史
+        
+        将 key 统一转为字符串，并通过中间变量避免写入过程中断导致文件损坏。
         """
         try:
             # 确保 key 为字符串以避免 JSON 序列化时出现重复 key
-            str_keyed = {str(k): v for k, v in self.position_history.items()}
-            with open(self.position_history_file, 'w', encoding='utf-8') as f:
+            # 同时使用 dict 推导式天然去重（相同 str(k) 只保留最后一个）
+            str_keyed = {}
+            seen_keys = set()
+            for k, v in self.position_history.items():
+                str_k = str(k)
+                if str_k in seen_keys:
+                    print(f"检测到重复 key '{str_k}'，保留最新值")
+                seen_keys.add(str_k)
+                str_keyed[str_k] = v
+            
+            # 先写入临时文件，再原子替换，防止写入中断导致文件损坏
+            tmp_path = self.position_history_file + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(str_keyed, f, ensure_ascii=False, indent=4)
+            
+            # 替换原文件
+            if os.path.exists(self.position_history_file):
+                os.replace(tmp_path, self.position_history_file)
+            else:
+                os.rename(tmp_path, self.position_history_file)
         except Exception as e:
             print(f"保存位置历史时出错: {e}")
+            # 清理可能残留的临时文件
+            tmp_path = self.position_history_file + '.tmp'
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
     
     def clear_position_history(self):
         """

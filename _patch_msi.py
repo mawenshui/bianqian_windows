@@ -7,7 +7,7 @@ MSI 后处理：
 import msilib
 import sys
 
-MSI_PATH = sys.argv[1] if len(sys.argv) > 1 else r'dist\StickyNote-1.6.0-win64.msi'
+MSI_PATH = sys.argv[1] if len(sys.argv) > 1 else r'dist\StickyNote-1.6.1-win64.msi'
 
 # ── 中文覆写表：{(Dialog_, Control): 新文本} ──
 OVERRIDES = {
