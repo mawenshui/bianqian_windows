@@ -1,6 +1,6 @@
 # 桌面便签 (StickyNote) — 用户使用手册
 
-> **版本**: v1.6.0 | **平台**: Windows 10/11 | **作者**: MaWenshui
+> **版本**: v1.6.2 | **平台**: Windows 10/11 | **作者**: MaWenshui
 
 一款轻量级 Windows 桌面便签工具，支持富文本编辑、多主题、标签管理、定时提醒、智能格式化、自动备份与在线更新。
 
@@ -483,5 +483,5 @@ A: 托盘菜单 → 导入导出 → 导出标签页 → 全选 → 选择格式
 
 ---
 
-*本手册适用于 StickyNote v1.6.0*
+*本手册适用于 StickyNote v1.6.2*
 *项目地址: https://github.com/mawenshui/bianqian_windows*

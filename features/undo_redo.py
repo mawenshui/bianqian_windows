@@ -44,7 +44,7 @@ class UndoRedoManager(QObject):
     管理编辑器的撤销重做操作
     """
     
-    state_changed = pyqtSignal()  # 状态变化信号
+    state_changed = pyqtSignal(bool, bool)  # 状态变化信号 (can_undo, can_redo)
     
     def __init__(self, title_edit, content_edit, max_history=50):
         """
@@ -121,7 +121,7 @@ class UndoRedoManager(QObject):
             self.current_index += 1
         
         self.last_save_time = current_time
-        self.state_changed.emit()
+        self.state_changed.emit(self.can_undo(), self.can_redo())
     
     def undo(self):
         """
@@ -142,7 +142,7 @@ class UndoRedoManager(QObject):
         # 移动到前一个状态
         self.current_index -= 1
         self.restore_state(self.history[self.current_index])
-        self.state_changed.emit()
+        self.state_changed.emit(self.can_undo(), self.can_redo())
         return True
     
     def redo(self):
@@ -158,7 +158,7 @@ class UndoRedoManager(QObject):
         # 移动到下一个状态
         self.current_index += 1
         self.restore_state(self.history[self.current_index])
-        self.state_changed.emit()
+        self.state_changed.emit(self.can_undo(), self.can_redo())
         return True
     
     def restore_state(self, state):
@@ -222,6 +222,17 @@ class UndoRedoManager(QObject):
         self.current_index = -1
         self.save_current_state()
     
+    def get_stack_depth(self):
+        """
+        获取撤销/重做栈深度
+        
+        Returns:
+            tuple: (undo_depth, redo_depth) 可撤销步数和可重做步数
+        """
+        undo_depth = self.current_index
+        redo_depth = len(self.history) - 1 - self.current_index
+        return (undo_depth, redo_depth)
+
     def get_history_info(self):
         """
         获取历史记录信息

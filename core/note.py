@@ -8,12 +8,17 @@
 
 import os
 import json
+import logging
 import re
+import time
+import copy
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QMessageBox, QCheckBox,
-    QColorDialog, QSystemTrayIcon, QMenu, QAction
+    QColorDialog, QSystemTrayIcon, QMenu, QAction,
+    QStackedWidget, QTextBrowser, QTextEdit, QInputDialog, QFileDialog,
+    QListWidget, QDialog, QLineEdit
 )
 from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QTimer, QThread, QSize, QPropertyAnimation, QEasingCurve, QEvent, pyqtSignal
 from PyQt5.QtGui import (
@@ -24,6 +29,7 @@ from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit, UndoRedoManag
 from features.positioning import get_position_manager
 from features.formatter import ContentFormatter
 from features.tag import TagChipWidget
+from features.richtext import RichTextActions
 from core import get_styles_dir, __version__
 
 # 窗口调整大小检测边界宽度
@@ -152,9 +158,13 @@ class StickyNote(QWidget):
         self.manager = manager
         self.is_deleted = False
 
-        self.notes_dir = os.path.abspath(notes_dir)
+        self.notes_dir = os.path.realpath(os.path.abspath(notes_dir))
         os.makedirs(self.notes_dir, exist_ok=True)
         self.note_file = os.path.join(self.notes_dir, f'note_{self.note_id}.json')
+        # 路径穿越防护：确保 note_file 在 notes_dir 内
+        real_note_file = os.path.realpath(self.note_file)
+        if not real_note_file.startswith(self.notes_dir + os.sep):
+            raise ValueError(f'便签文件路径不合法: {self.note_file}')
         self.note_data = self.load_note(preloaded_data)
 
         self.theme = self.note_data.get('theme', theme_css)
@@ -179,6 +189,19 @@ class StickyNote(QWidget):
         self.hide_tab = None              # 隐藏后显示的标签页小窗口
         self._hover_restored = False      # 当前展开是否由悬停触发（离开即缩回）
         self._auto_rehide_timer = None    # 悬停展开后自动缩回的延迟定时器
+
+        # 锁定/置顶/收藏状态
+        self.is_locked = self.note_data.get('locked', False)
+        self.is_pinned = self.note_data.get('pinned', False)
+        self.is_favorite = self.note_data.get('favorite', False)
+
+        # paintEvent 渲染缓存
+        self._border_pen = QPen(QColor(200, 200, 200))
+        self._border_pen.setWidth(2)
+
+        # 屏幕几何缓存
+        self._screen_geo_cache = None
+        self._screen_geo_cache_time = 0
 
         self.initUI()
 
@@ -216,12 +239,32 @@ class StickyNote(QWidget):
         else:
             self.text_edit.setText(content)
         self.text_edit.textChanged.connect(self.update_content)
-        main_layout.addWidget(self.text_edit)
+
+        # Rich text actions 封装
+        self.rich_text = RichTextActions(self.text_edit)
+        self.is_markdown_mode = False
+        self.md_renderer = None
+
+        # 编辑器栈（富文本编辑 / Markdown 预览）
+        self.editor_stack = QStackedWidget()
+        self.editor_stack.addWidget(self.text_edit)  # page 0: 富文本编辑器
+        self.md_preview = QTextBrowser()
+        self.md_preview.setOpenExternalLinks(True)
+        # 设置独立样式，防止被便签主题样式覆盖列表标号
+        self.md_preview.setStyleSheet('''
+            QTextBrowser {
+                background-color: #FFFFFF;
+                border: 1px solid #ddd;
+            }
+        ''')
+        self.editor_stack.addWidget(self.md_preview)  # page 1: Markdown 预览
+        main_layout.addWidget(self.editor_stack)
 
         # 撤销/重做管理器
         self.undo_redo_manager = UndoRedoManager(self.title_edit, self.text_edit)
         self.title_edit.set_undo_redo_manager(self.undo_redo_manager)
         self.text_edit.set_undo_redo_manager(self.undo_redo_manager)
+        self.undo_redo_manager.state_changed.connect(self._update_undo_redo_buttons)
 
         # 字体大小调整按钮布局
         font_layout = QHBoxLayout()
@@ -268,6 +311,95 @@ class StickyNote(QWidget):
         self.color_btn.clicked.connect(self.choose_font_color)
         font_layout.addWidget(self.color_btn)
 
+        # 下划线
+        self.separator3 = QLabel('|')
+        font_layout.addWidget(self.separator3)
+
+        self.underline_btn = QPushButton('U')
+        self.underline_btn.setFixedSize(30, 30)
+        self.underline_btn.setCheckable(True)
+        self.underline_btn.setToolTip('下划线')
+        self.underline_btn.clicked.connect(self._toggle_underline)
+        font_layout.addWidget(self.underline_btn)
+
+        # 删除线
+        self.strikethrough_btn = QPushButton('S')
+        self.strikethrough_btn.setFixedSize(30, 30)
+        self.strikethrough_btn.setCheckable(True)
+        self.strikethrough_btn.setToolTip('删除线')
+        self.strikethrough_btn.clicked.connect(self._toggle_strikethrough)
+        font_layout.addWidget(self.strikethrough_btn)
+
+        # 上标/下标
+        self.separator4 = QLabel('|')
+        font_layout.addWidget(self.separator4)
+
+        self.superscript_btn = QPushButton('x²')
+        self.superscript_btn.setFixedSize(30, 30)
+        self.superscript_btn.setToolTip('上标')
+        self.superscript_btn.clicked.connect(self.rich_text.toggle_superscript)
+        font_layout.addWidget(self.superscript_btn)
+
+        self.subscript_btn = QPushButton('x₂')
+        self.subscript_btn.setFixedSize(30, 30)
+        self.subscript_btn.setToolTip('下标')
+        self.subscript_btn.clicked.connect(self.rich_text.toggle_subscript)
+        font_layout.addWidget(self.subscript_btn)
+
+        # 对齐
+        self.separator5 = QLabel('|')
+        font_layout.addWidget(self.separator5)
+
+        self.align_left_btn = QPushButton('⇤')
+        self.align_left_btn.setFixedSize(30, 30)
+        self.align_left_btn.setToolTip('左对齐')
+        self.align_left_btn.clicked.connect(lambda: self.rich_text.set_alignment(Qt.AlignLeft))
+        font_layout.addWidget(self.align_left_btn)
+
+        self.align_center_btn = QPushButton('≡')
+        self.align_center_btn.setFixedSize(30, 30)
+        self.align_center_btn.setToolTip('居中')
+        self.align_center_btn.clicked.connect(lambda: self.rich_text.set_alignment(Qt.AlignCenter))
+        font_layout.addWidget(self.align_center_btn)
+
+        self.align_right_btn = QPushButton('⇥')
+        self.align_right_btn.setFixedSize(30, 30)
+        self.align_right_btn.setToolTip('右对齐')
+        self.align_right_btn.clicked.connect(lambda: self.rich_text.set_alignment(Qt.AlignRight))
+        font_layout.addWidget(self.align_right_btn)
+
+        # 列表
+        self.separator6 = QLabel('|')
+        font_layout.addWidget(self.separator6)
+
+        self.ordered_list_btn = QPushButton('1.')
+        self.ordered_list_btn.setFixedSize(30, 30)
+        self.ordered_list_btn.setToolTip('有序列表')
+        self.ordered_list_btn.clicked.connect(self.rich_text.insert_ordered_list)
+        font_layout.addWidget(self.ordered_list_btn)
+
+        self.unordered_list_btn = QPushButton('•')
+        self.unordered_list_btn.setFixedSize(30, 30)
+        self.unordered_list_btn.setToolTip('无序列表')
+        self.unordered_list_btn.clicked.connect(self.rich_text.insert_unordered_list)
+        font_layout.addWidget(self.unordered_list_btn)
+
+        # 高亮
+        self.separator7 = QLabel('|')
+        font_layout.addWidget(self.separator7)
+
+        self.highlight_btn = QPushButton('🖍')
+        self.highlight_btn.setFixedSize(30, 30)
+        self.highlight_btn.setToolTip('背景高亮')
+        self.highlight_btn.clicked.connect(self._choose_highlight_color)
+        font_layout.addWidget(self.highlight_btn)
+
+        self.clear_highlight_btn = QPushButton('✖')
+        self.clear_highlight_btn.setFixedSize(30, 30)
+        self.clear_highlight_btn.setToolTip('清除高亮')
+        self.clear_highlight_btn.clicked.connect(self.rich_text.clear_highlight)
+        font_layout.addWidget(self.clear_highlight_btn)
+
         font_layout.addStretch()
         main_layout.addLayout(font_layout)
 
@@ -301,6 +433,21 @@ class StickyNote(QWidget):
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(10)
         
+        # 撤销/重做按钮
+        self.undo_btn = QPushButton('↩')
+        self.undo_btn.setToolTip('撤销 (Ctrl+Z)')
+        self.undo_btn.setFixedSize(36, 30)
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.clicked.connect(self.undo_redo_manager.undo)
+        buttons_layout.addWidget(self.undo_btn)
+
+        self.redo_btn = QPushButton('↪')
+        self.redo_btn.setToolTip('重做 (Ctrl+Y)')
+        self.redo_btn.setFixedSize(36, 30)
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.clicked.connect(self.undo_redo_manager.redo)
+        buttons_layout.addWidget(self.redo_btn)
+
         # 标签按钮
         self.tag_btn = QPushButton('🏷')
         self.tag_btn.setToolTip('设置标签')
@@ -315,11 +462,47 @@ class StickyNote(QWidget):
         self.reminder_btn.clicked.connect(self.open_reminder_dialog)
         buttons_layout.addWidget(self.reminder_btn)
         
-        delete_btn = QPushButton('删除')
-        delete_btn.setToolTip('\u5220\u9664\u4fbf\u7b7e')
-        delete_btn.setFixedSize(60, 30)
-        delete_btn.clicked.connect(self.delete_note)
-        buttons_layout.addWidget(delete_btn)
+        # 锁定/解锁按钮
+        self.lock_btn = QPushButton('🔒' if self.is_locked else '🔓')
+        self.lock_btn.setToolTip('锁定便签' if not self.is_locked else '解锁便签')
+        self.lock_btn.setFixedSize(36, 30)
+        self.lock_btn.clicked.connect(self._toggle_lock)
+        buttons_layout.addWidget(self.lock_btn)
+        
+        # 插入链接
+        self.link_btn = QPushButton('🔗')
+        self.link_btn.setToolTip('插入链接')
+        self.link_btn.setFixedSize(36, 30)
+        self.link_btn.clicked.connect(self._insert_hyperlink_dialog)
+        buttons_layout.addWidget(self.link_btn)
+        
+        # 插入图片
+        self.image_btn = QPushButton('🖼')
+        self.image_btn.setToolTip('插入图片')
+        self.image_btn.setFixedSize(36, 30)
+        self.image_btn.clicked.connect(self._insert_image_dialog)
+        buttons_layout.addWidget(self.image_btn)
+        
+        # Markdown 预览切换
+        self.md_toggle_btn = QPushButton('MD')
+        self.md_toggle_btn.setToolTip('切换 Markdown 预览')
+        self.md_toggle_btn.setFixedSize(36, 30)
+        self.md_toggle_btn.setCheckable(True)
+        self.md_toggle_btn.clicked.connect(self._toggle_markdown_mode)
+        buttons_layout.addWidget(self.md_toggle_btn)
+        
+        # 便签反向链接
+        self.backlink_btn = QPushButton('🔙')
+        self.backlink_btn.setToolTip('便签反向链接')
+        self.backlink_btn.setFixedSize(36, 30)
+        self.backlink_btn.clicked.connect(self._show_backlinks)
+        buttons_layout.addWidget(self.backlink_btn)
+        
+        self.delete_btn = QPushButton('删除')
+        self.delete_btn.setToolTip('\u5220\u9664\u4fbf\u7b7e')
+        self.delete_btn.setFixedSize(60, 30)
+        self.delete_btn.clicked.connect(self.delete_note)
+        buttons_layout.addWidget(self.delete_btn)
         
         # 使用说明按钮
         self.help_btn = QPushButton('?')
@@ -328,26 +511,28 @@ class StickyNote(QWidget):
         self.help_btn.clicked.connect(self.show_quick_help)
         buttons_layout.addWidget(self.help_btn)
         
-        hide_btn = QPushButton('隐藏')
-        hide_btn.setToolTip('\u9690\u85cf\u4fbf\u7b7e')
-        hide_btn.setFixedSize(60, 30)
-        hide_btn.clicked.connect(self.hide_note)
-        buttons_layout.addWidget(hide_btn)
+        self.hide_btn = QPushButton('隐藏')
+        self.hide_btn.setToolTip('\u9690\u85cf\u4fbf\u7b7e')
+        self.hide_btn.setFixedSize(60, 30)
+        self.hide_btn.clicked.connect(self.hide_note)
+        buttons_layout.addWidget(self.hide_btn)
 
         toolbar.addLayout(buttons_layout)
         main_layout.addLayout(toolbar)
 
-        # 标签芯片显示区
+        # 标签芯片显示区（版本号固定左下角，标签在其右侧排列）
         self.tags_layout = QHBoxLayout()
         self.tags_layout.setContentsMargins(0, 2, 0, 2)
         self.tags_layout.setSpacing(4)
-        self.tags_layout.addStretch()
 
-        # 版本标签（右下角淡色显示）
+        # 版本标签（固定在最左侧）
         self.version_label = QLabel(f'v{__version__}')
         self.version_label.setStyleSheet('color: #bbb; font-size: 7pt; background: transparent; border: none;')
         self.version_label.setToolTip(f'StickyNote v{__version__} by MaWenshui')
         self.tags_layout.addWidget(self.version_label)
+
+        # 标签芯片将插入到这里（版本号右侧）
+        self.tags_layout.addStretch()  # stretch 在最后，将标签靠左排列
 
         main_layout.addLayout(self.tags_layout)
 
@@ -438,40 +623,86 @@ class StickyNote(QWidget):
         content_font.setPointSize(content_size)
         self.text_edit.setFont(content_font)
 
+    def _change_selected_font_size(self, delta):
+        """修改选中文字的字体大小（仅影响 text_edit 中的选中文本）"""
+        cursor = self.text_edit.textCursor()
+        if not cursor.hasSelection():
+            return False
+        fmt = cursor.charFormat()
+        current_size = fmt.fontPointSize()
+        if current_size <= 0:
+            current_size = self.text_edit.font().pointSize() or 12
+        new_size = max(6, current_size + delta)
+        fmt.setFontPointSize(new_size)
+        cursor.mergeCharFormat(fmt)
+        return True
+
     def increase_font_size(self):
+        # 如果有选中文本，只改变选中文本的字体大小
+        if self.text_edit.textCursor().hasSelection():
+            self._change_selected_font_size(1)
+            if not self.is_deleted:
+                self.save_note()
+            return
+        # 无选中文本时，只改变内容编辑器的字体大小（不影响标题）
         if hasattr(self, 'font_settings') and self.font_settings:
             current_size = self.font_settings.get('size', 12)
             self.font_settings['size'] = current_size + 1
-            self.apply_font()
+            self._apply_font_to_content_only()
             if not self.is_deleted:
                 self.save_note()
         else:
-            self.title_font_size += 1
             self.content_font_size += 1
-            self.set_font_size(self.title_font_size, self.content_font_size)
-            self.note_data['title_font_size'] = self.title_font_size
+            content_font = QFont()
+            content_font.setPointSize(self.content_font_size)
+            self.text_edit.setFont(content_font)
             self.note_data['content_font_size'] = self.content_font_size
             if not self.is_deleted:
                 self.save_note()
 
     def decrease_font_size(self):
+        # 如果有选中文本，只改变选中文本的字体大小
+        if self.text_edit.textCursor().hasSelection():
+            self._change_selected_font_size(-1)
+            if not self.is_deleted:
+                self.save_note()
+            return
+        # 无选中文本时，只改变内容编辑器的字体大小（不影响标题）
         if hasattr(self, 'font_settings') and self.font_settings:
             current_size = self.font_settings.get('size', 12)
             if current_size > 6:
                 self.font_settings['size'] = current_size - 1
-                self.apply_font()
+                self._apply_font_to_content_only()
                 if not self.is_deleted:
                     self.save_note()
         else:
-            if self.title_font_size > 6:
-                self.title_font_size -= 1
             if self.content_font_size > 6:
                 self.content_font_size -= 1
-            self.set_font_size(self.title_font_size, self.content_font_size)
-            self.note_data['title_font_size'] = self.title_font_size
+            content_font = QFont()
+            content_font.setPointSize(self.content_font_size)
+            self.text_edit.setFont(content_font)
             self.note_data['content_font_size'] = self.content_font_size
             if not self.is_deleted:
                 self.save_note()
+
+    def _apply_font_to_content_only(self):
+        """仅将字体设置应用到内容编辑器，不影响标题"""
+        font_settings = getattr(self, 'font_settings', {})
+        if not font_settings:
+            return
+        font_family = font_settings.get('family', '微软雅黑')
+        font_size = font_settings.get('size', 12)
+        font_weight = 'bold' if font_settings.get('bold', False) else 'normal'
+        font_style = 'italic' if font_settings.get('italic', False) else 'normal'
+        font_color = getattr(self, 'font_color', '#000000')
+        font_style_sheet = f'''
+            font-family: "{font_family}" !important;
+            font-size: {font_size}pt !important;
+            font-weight: {font_weight} !important;
+            font-style: {font_style} !important;
+            color: {font_color} !important;
+        '''
+        self.text_edit.setStyleSheet(self.text_edit.styleSheet() + font_style_sheet)
 
     def toggle_bold(self):
         current_editor = self._get_focused_editor()
@@ -553,9 +784,21 @@ class StickyNote(QWidget):
         return self.text_edit
 
     def is_dark_theme(self, theme_css_content):
+        """检测主题是否为深色主题（基于背景色 W3C 相对亮度）"""
         bg_match = re.search(r'StickyNote\s*{[^}]*background-color:\s*([^;]+);', theme_css_content)
         if bg_match:
             bg_color = bg_match.group(1).strip()
+            hex_match = re.match(r'#([0-9a-fA-F]{3,8})', bg_color)
+            if hex_match:
+                hex_str = hex_match.group(1)
+                if len(hex_str) == 3:
+                    r, g, b = int(hex_str[0]*2, 16), int(hex_str[1]*2, 16), int(hex_str[2]*2, 16)
+                elif len(hex_str) >= 6:
+                    r, g, b = int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16)
+                else:
+                    return False
+                luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+                return luminance < 0.5
             dark_keywords = ['#2', '#3', '#4', '#5', 'black', 'dark']
             return any(keyword in bg_color.lower() for keyword in dark_keywords)
         return False
@@ -577,12 +820,15 @@ class StickyNote(QWidget):
             }
 
     def apply_adaptive_control_styles(self, styles):
-        if hasattr(self, 'separator1'):
-            self.separator1.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
-        if hasattr(self, 'separator2'):
-            self.separator2.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+        # 分隔符标签样式
+        for sep in ['separator1', 'separator2', 'separator3', 'separator4',
+                     'separator5', 'separator6', 'separator7']:
+            if hasattr(self, sep):
+                getattr(self, sep).setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
         if hasattr(self, 'transparency_label'):
             self.transparency_label.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+
+        # 通用按钮模板
         button_template = '''
             QPushButton {{
                 background-color: {bg}; color: {color}; border: 1px solid {border};
@@ -590,17 +836,102 @@ class StickyNote(QWidget):
             }}
             QPushButton:hover {{ background-color: {hover_bg}; }}
             QPushButton:checked {{ background-color: {checked_bg}; color: {checked_color}; border: 1px solid {checked_bg}; }}
+            QPushButton:disabled {{ color: #888; background-color: #444; }}
         '''
-        font_button_style = button_template.format(**styles)
-        for btn in ['decrease_font_btn', 'increase_font_btn', 'bold_btn']:
+        base_style = button_template.format(**styles)
+
+        # 字体工具栏按钮
+        for btn in ['decrease_font_btn', 'increase_font_btn', 'bold_btn',
+                     'underline_btn', 'strikethrough_btn', 'superscript_btn',
+                     'subscript_btn', 'align_left_btn', 'align_center_btn',
+                     'align_right_btn', 'ordered_list_btn', 'unordered_list_btn',
+                     'highlight_btn', 'clear_highlight_btn']:
             if hasattr(self, btn):
-                getattr(self, btn).setStyleSheet(font_button_style)
+                getattr(self, btn).setStyleSheet(base_style)
+
+        # 斜体按钮（加 italic 样式）
         if hasattr(self, 'italic_btn'):
             italic_style = button_template.replace('font-weight: bold;', 'font-weight: bold; font-style: italic;').format(**styles)
             self.italic_btn.setStyleSheet(italic_style)
+
+        # 颜色按钮（红色文字）
         if hasattr(self, 'color_btn'):
             color_style = button_template.replace('color: {color}', 'color: red').format(**styles)
             self.color_btn.setStyleSheet(color_style)
+
+        # 功能按钮（撤销/重做/标签/提醒/锁定/链接/图片/MD/反链/删除/帮助/隐藏）
+        for btn in ['undo_btn', 'redo_btn', 'tag_btn', 'reminder_btn',
+                     'lock_btn', 'link_btn', 'image_btn', 'md_toggle_btn',
+                     'backlink_btn', 'help_btn', 'hide_btn']:
+            if hasattr(self, btn):
+                getattr(self, btn).setStyleSheet(base_style)
+
+        # 删除按钮特殊样式（红色调）
+        if hasattr(self, 'delete_btn'):
+            danger_style = base_style.replace(styles['bg'], '#e74c3c').replace(styles['hover_bg'], '#c0392b')
+            self.delete_btn.setStyleSheet(danger_style)
+
+    @staticmethod
+    def _get_extra_theme_css(is_dark):
+        """生成所有主题通用的补充 CSS（QScrollBar、Slider groove、QStackedWidget 等）"""
+        if is_dark:
+            return '''
+                QScrollBar:vertical {
+                    background: #2b2b2b; width: 12px; border: none;
+                }
+                QScrollBar::handle:vertical {
+                    background: #555; border-radius: 6px; min-height: 30px;
+                }
+                QScrollBar::handle:vertical:hover { background: #666; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+                QScrollBar:horizontal {
+                    background: #2b2b2b; height: 12px; border: none;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #555; border-radius: 6px; min-width: 30px;
+                }
+                QScrollBar::handle:horizontal:hover { background: #666; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+                QSlider::groove:horizontal {
+                    background: #555; height: 6px; border-radius: 3px;
+                }
+                QStackedWidget { background: transparent; border: none; }
+                QTextBrowser {
+                    background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #555;
+                }
+                QLabel { background: transparent; }
+            '''
+        else:
+            return '''
+                QScrollBar:vertical {
+                    background: #f5f5f5; width: 12px; border: none;
+                }
+                QScrollBar::handle:vertical {
+                    background: #ccc; border-radius: 6px; min-height: 30px;
+                }
+                QScrollBar::handle:vertical:hover { background: #aaa; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+                QScrollBar:horizontal {
+                    background: #f5f5f5; height: 12px; border: none;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #ccc; border-radius: 6px; min-width: 30px;
+                }
+                QScrollBar::handle:horizontal:hover { background: #aaa; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+                QSlider::groove:horizontal {
+                    background: #ddd; height: 6px; border-radius: 3px;
+                }
+                QStackedWidget { background: transparent; border: none; }
+                QTextBrowser {
+                    background-color: #FFFFFF; color: #333; border: 1px solid #ddd;
+                }
+                QLabel { background: transparent; }
+            '''
 
     def apply_theme(self):
         """
@@ -625,12 +956,29 @@ class StickyNote(QWidget):
                 self._apply_default_style()
                 return
 
-            self.setStyleSheet(style)
-            self.text_edit.setStyleSheet(style)
-            self.title_edit.setStyleSheet(style)
             is_dark = self.is_dark_theme(style)
+            # 追加通用补充 CSS（QScrollBar / QSlider groove / QStackedWidget 等）
+            extra_css = self._get_extra_theme_css(is_dark)
+            full_style = style + extra_css
+            self.setStyleSheet(full_style)
+            self.text_edit.setStyleSheet(full_style)
+            self.title_edit.setStyleSheet(full_style)
             adaptive_styles = self.get_adaptive_control_styles(is_dark)
             self.apply_adaptive_control_styles(adaptive_styles)
+            # md_preview 根据深色/浅色主题设置独立样式
+            if hasattr(self, 'md_preview'):
+                md_bg = '#2b2b2b' if is_dark else '#FFFFFF'
+                md_border = '#555' if is_dark else '#ddd'
+                md_text = '#e0e0e0' if is_dark else '#333333'
+                self.md_preview.setStyleSheet(f'''
+                    QTextBrowser {{
+                        background-color: {md_bg};
+                        color: {md_text};
+                        border: 1px solid {md_border};
+                    }}
+                ''')
+            # 更新边框画笔颜色以匹配主题
+            self._border_pen.setColor(QColor(100, 100, 100) if is_dark else QColor(200, 200, 200))
             if hasattr(self, 'font_settings') and self.font_settings:
                 self.apply_font()
         except Exception as e:
@@ -658,6 +1006,20 @@ class StickyNote(QWidget):
         is_dark = self.is_dark_theme(default_style)
         adaptive_styles = self.get_adaptive_control_styles(is_dark)
         self.apply_adaptive_control_styles(adaptive_styles)
+        # md_preview 根据深色/浅色主题设置独立样式
+        if hasattr(self, 'md_preview'):
+            md_bg = '#2b2b2b' if is_dark else '#FFFFFF'
+            md_border = '#555' if is_dark else '#ddd'
+            md_text = '#e0e0e0' if is_dark else '#333333'
+            self.md_preview.setStyleSheet(f'''
+                QTextBrowser {{
+                    background-color: {md_bg};
+                    color: {md_text};
+                    border: 1px solid {md_border};
+                }}
+            ''')
+        # 更新边框画笔颜色
+        self._border_pen.setColor(QColor(100, 100, 100) if is_dark else QColor(200, 200, 200))
         if hasattr(self, 'font_settings') and self.font_settings:
             self.apply_font()
 
@@ -744,12 +1106,18 @@ class StickyNote(QWidget):
             'plain_content': '',
             'opacity': 0.9,
             'always_on_top': True,
+            'locked': False,
+            'pinned': False,
+            'favorite': False,
             'geometry': None,
             'theme': "soft_yellow.css",
             'title_font_size': 12,
             'content_font_size': 12,
             'auto_format_enabled': True,
-            'font_color': '#000000'
+            'font_color': '#000000',
+            'advanced_toolbar_visible': False,
+            'edit_mode': 'richtext',
+            'markdown_content': ''
         }
 
     def save_note(self):
@@ -800,7 +1168,7 @@ class StickyNote(QWidget):
             return
         try:
             # 深拷贝数据，避免后台线程访问时数据被修改
-            data_copy = json.loads(json.dumps(self.note_data))
+            data_copy = copy.deepcopy(self.note_data)
             self._save_worker = NoteSaveWorker(data_copy, self.note_file)
             self._save_worker.start()
         except Exception as e:
@@ -873,7 +1241,7 @@ class StickyNote(QWidget):
                         self.hide_tab.removeEventFilter(self)
                         self.hide_tab.close()
                     except Exception:
-                        pass
+                        logger.debug('关闭隐藏标签页时出错', exc_info=True)
                     self.hide_tab = None
                 self.auto_hidden = False
         
@@ -959,6 +1327,151 @@ class StickyNote(QWidget):
         )
         QMessageBox.information(self, '使用说明', help_text)
 
+    def _update_undo_redo_buttons(self, can_undo, can_redo):
+        """根据撤销/重做栈状态更新工具栏按钮"""
+        if hasattr(self, 'undo_btn'):
+            self.undo_btn.setEnabled(can_undo)
+            if can_undo:
+                depth = self.undo_redo_manager.get_stack_depth()
+                self.undo_btn.setToolTip(f'撤销 (Ctrl+Z) — 可撤销 {depth[0]} 步')
+            else:
+                self.undo_btn.setToolTip('撤销 (Ctrl+Z)')
+        if hasattr(self, 'redo_btn'):
+            self.redo_btn.setEnabled(can_redo)
+            if can_redo:
+                depth = self.undo_redo_manager.get_stack_depth()
+                self.redo_btn.setToolTip(f'重做 (Ctrl+Y) — 可重做 {depth[1]} 步')
+            else:
+                self.redo_btn.setToolTip('重做 (Ctrl+Y)')
+
+    # ==================== 富文本工具栏辅助方法 ====================
+
+    def _toggle_underline(self):
+        """切换下划线"""
+        self.rich_text.toggle_underline()
+        # 同步按钮状态
+        fmt = self.text_edit.currentCharFormat()
+        self.underline_btn.setChecked(fmt.fontUnderline())
+        if not self.is_deleted:
+            self.save_note()
+
+    def _toggle_strikethrough(self):
+        """切换删除线"""
+        self.rich_text.toggle_strikethrough()
+        fmt = self.text_edit.currentCharFormat()
+        self.strikethrough_btn.setChecked(fmt.fontStrikeOut())
+        if not self.is_deleted:
+            self.save_note()
+
+    def _choose_highlight_color(self):
+        """选择高亮颜色"""
+        color = QColorDialog.getColor(QColor('#FFFF00'), self, '选择高亮颜色')
+        if color.isValid():
+            self.rich_text.set_highlight_color(color)
+            if not self.is_deleted:
+                self.save_note()
+
+    def _insert_hyperlink_dialog(self):
+        """插入超链接对话框"""
+        url, ok1 = QInputDialog.getText(self, '插入链接', 'URL:')
+        if not ok1 or not url:
+            return
+        text, ok2 = QInputDialog.getText(self, '插入链接', '显示文本:', text=url)
+        if ok2 and text:
+            self.rich_text.insert_hyperlink(url, text)
+            if not self.is_deleted:
+                self.save_note()
+
+    def _insert_image_dialog(self):
+        """插入图片对话框"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, '选择图片', '',
+            '图片文件 (*.png *.jpg *.jpeg *.gif *.bmp *.webp)'
+        )
+        if file_path:
+            self.rich_text.insert_image_from_file(
+                file_path, strategy='base64',
+                notes_dir=self.notes_dir, note_id=self.note_id
+            )
+            if not self.is_deleted:
+                self.save_note()
+
+    def _toggle_markdown_mode(self):
+        """切换 Markdown 预览模式"""
+        self.is_markdown_mode = not self.is_markdown_mode
+        if self.is_markdown_mode:
+            # 切换到 Markdown 预览
+            if self.md_renderer is None:
+                try:
+                    from features.markdown_renderer import MarkdownRenderer
+                    self.md_renderer = MarkdownRenderer()
+                except ImportError:
+                    self.md_renderer = None
+            md_text = self.text_edit.toPlainText()
+            if self.md_renderer:
+                body_html, css = self.md_renderer.render_for_qt(md_text)
+                # 使用 setDefaultStyleSheet + body-only HTML 确保 QTextBrowser 正确渲染样式
+                self.md_preview.document().setDefaultStyleSheet(css)
+                self.md_preview.setHtml(body_html)
+            else:
+                self.md_preview.setHtml(f'<pre>{md_text}</pre>')
+            self.editor_stack.setCurrentIndex(1)
+            self.md_toggle_btn.setChecked(True)
+            self.md_toggle_btn.setToolTip('切换回富文本编辑')
+        else:
+            # 切换回富文本编辑
+            self.editor_stack.setCurrentIndex(0)
+            self.md_toggle_btn.setChecked(False)
+            self.md_toggle_btn.setToolTip('切换 Markdown 预览')
+
+    def _show_backlinks(self):
+        """显示便签反向链接"""
+        if not self.manager or not hasattr(self.manager, 'link_manager'):
+            QMessageBox.information(self, '反向链接', '链接功能未启用')
+            return
+        try:
+            title = self.title_edit.text().strip()
+            backlinks = self.manager.link_manager.get_backlinks(self.note_id, title)
+            if backlinks:
+                lines = [f'• {link_title} (ID: {link_id})' for link_id, link_title in backlinks]
+                QMessageBox.information(self, f'“{title}” 的反向链接',
+                                       '\n'.join(lines))
+            else:
+                QMessageBox.information(self, f'“{title}” 的反向链接',
+                                       '暂无其他便签链接到此便签')
+        except Exception as e:
+            logger.debug(f'获取反向链接失败: {e}')
+            QMessageBox.information(self, '反向链接', f'无法获取反向链接: {e}')
+
+    def _toggle_lock(self):
+        """切换便签锁定状态"""
+        self.is_locked = not self.is_locked
+        self.note_data['locked'] = self.is_locked
+        self.lock_btn.setText('🔒' if self.is_locked else '🔓')
+        self.lock_btn.setToolTip('解锁便签' if self.is_locked else '锁定便签')
+        self.title_edit.setReadOnly(self.is_locked)
+        self.text_edit.setReadOnly(self.is_locked)
+        if not self.is_deleted:
+            self.save_note()
+
+    def toggle_pin(self):
+        """切换便签置顶状态"""
+        self.is_pinned = not self.is_pinned
+        self.note_data['pinned'] = self.is_pinned
+        if not self.is_deleted:
+            self.save_note()
+        if self.manager:
+            self.manager.update_tray_menu()
+
+    def toggle_favorite(self):
+        """切换便签收藏状态"""
+        self.is_favorite = not self.is_favorite
+        self.note_data['favorite'] = self.is_favorite
+        if not self.is_deleted:
+            self.save_note()
+        if self.manager:
+            self.manager.update_tray_menu()
+
     def open_reminder_dialog(self):
         """打开提醒设置对话框"""
         from features.reminder import ReminderDialog
@@ -976,11 +1489,11 @@ class StickyNote(QWidget):
                 self.manager.update_tray_menu()
 
     def refresh_tag_chips(self):
-        """刷新标签芯片显示"""
-        # 清除现有芯片
-        while self.tags_layout.count() > 1:  # 保留最后的 stretch
-            item = self.tags_layout.takeAt(0)
-            if item.widget():
+        """刷新标签芯片显示（版本号固定左侧，标签在右侧排列）"""
+        # 清除现有标签芯片（保留 index 0 的 version_label 和最后的 stretch）
+        while self.tags_layout.count() > 2:
+            item = self.tags_layout.takeAt(1)  # 从 index 1 开始删除
+            if item and item.widget():
                 item.widget().deleteLater()
 
         tags = self.note_data.get('tags', [])
@@ -990,6 +1503,7 @@ class StickyNote(QWidget):
             color = self.manager.tag_manager.get_tag_color(tag_name)
             chip = TagChipWidget(tag_name, color, self)
             chip.removed.connect(self._on_tag_removed)
+            # 插入在 stretch 之前（即 count()-1 的位置）
             self.tags_layout.insertWidget(self.tags_layout.count() - 1, chip)
 
     def _on_tag_removed(self, tag_name):
@@ -1098,7 +1612,7 @@ class StickyNote(QWidget):
         # 1. 吸附屏幕边缘
         desktop = QApplication.desktop()
         if desktop:
-            screen_geo = desktop.availableGeometry(self)
+            screen_geo = self._get_screen_geometry()
             # 左边缘
             if abs(new_geo.left() - screen_geo.left()) <= SNAP_THRESHOLD:
                 new_geo.moveLeft(screen_geo.left())
@@ -1166,6 +1680,18 @@ class StickyNote(QWidget):
     # 触发自动隐藏的屏幕边缘距离阈值（像素）
     AUTO_HIDE_THRESHOLD = 3
 
+    def _get_screen_geometry(self):
+        """获取当前屏幕可用几何区域（1秒缓存）"""
+        now = time.time()
+        if self._screen_geo_cache is not None and (now - self._screen_geo_cache_time) < 1.0:
+            return self._screen_geo_cache
+        desktop = QApplication.desktop()
+        if desktop:
+            self._screen_geo_cache = desktop.availableGeometry(self)
+            self._screen_geo_cache_time = now
+            return self._screen_geo_cache
+        return None
+
     def _check_auto_hide(self):
         """
         拖拽结束后检测是否贴到屏幕边缘，触发自动隐藏。
@@ -1180,7 +1706,7 @@ class StickyNote(QWidget):
         desktop = QApplication.desktop()
         if not desktop:
             return
-        screen = desktop.availableGeometry(self)
+        screen = self._get_screen_geometry()
 
         threshold = self.AUTO_HIDE_THRESHOLD
 
@@ -1277,7 +1803,7 @@ class StickyNote(QWidget):
         desktop = QApplication.desktop()
         if not desktop:
             return
-        screen = desktop.availableGeometry(self)
+        screen = self._get_screen_geometry()
         pre_geo = self._pre_hide_geometry
         tab_w, tab_h = 130, 28
 
@@ -1305,7 +1831,7 @@ class StickyNote(QWidget):
         desktop = QApplication.desktop()
         if not desktop:
             return
-        screen = desktop.availableGeometry(self)
+        screen = self._get_screen_geometry()
         current_pos = self.pos()
         w, h = self.width(), self.height()
 
@@ -1356,7 +1882,7 @@ class StickyNote(QWidget):
             # 确保目标位置在屏幕范围内
             desktop = QApplication.desktop()
             if desktop:
-                screen = desktop.availableGeometry(self)
+                screen = self._get_screen_geometry()
                 w, h = self._pre_hide_geometry.width(), self._pre_hide_geometry.height()
                 target_x = max(screen.left(), min(target_pos.x(), screen.right() - w))
                 target_y = max(screen.top(), min(target_pos.y(), screen.bottom() - h))
@@ -1365,7 +1891,7 @@ class StickyNote(QWidget):
             # 无历史位置，恢复到屏幕中央
             desktop = QApplication.desktop()
             if desktop:
-                screen = desktop.availableGeometry(self)
+                screen = self._get_screen_geometry()
                 target_pos = QPoint(
                     screen.left() + (screen.width() - self.width()) // 2,
                     screen.top() + (screen.height() - self.height()) // 2
@@ -1524,7 +2050,7 @@ class StickyNote(QWidget):
         desktop = QApplication.desktop()
         if not desktop:
             return
-        screen = desktop.availableGeometry(self)
+        screen = self._get_screen_geometry()
         geo = self.geometry()
 
         # 根据当前位置判断最近边缘
@@ -1575,9 +2101,7 @@ class StickyNote(QWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        pen = QPen(QColor(200, 200, 200))
-        pen.setWidth(2)
-        painter.setPen(pen)
+        painter.setPen(self._border_pen)
         painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
 
     # ==================== 右键上下文菜单 ====================
@@ -1599,6 +2123,23 @@ class StickyNote(QWidget):
 
         menu.addSeparator()
 
+        # 置顶
+        pin_action = QAction('📌 置顶' if not self.is_pinned else '📌 取消置顶', self)
+        pin_action.triggered.connect(self.toggle_pin)
+        menu.addAction(pin_action)
+
+        # 收藏
+        fav_action = QAction('⭐ 收藏' if not self.is_favorite else '⭐ 取消收藏', self)
+        fav_action.triggered.connect(self.toggle_favorite)
+        menu.addAction(fav_action)
+
+        # 锁定
+        lock_action = QAction('🔒 锁定' if not self.is_locked else '🔓 解锁', self)
+        lock_action.triggered.connect(self._toggle_lock)
+        menu.addAction(lock_action)
+
+        menu.addSeparator()
+
         # 主题子菜单
         theme_menu = QMenu('切换主题', menu)
         if self.manager:
@@ -1613,7 +2154,7 @@ class StickyNote(QWidget):
                     )
                     theme_menu.addAction(theme_action)
             except Exception:
-                pass
+                logger.debug('加载主题列表时出错', exc_info=True)
         menu.addMenu(theme_menu)
 
         # 字体大小快速调整
@@ -1645,7 +2186,7 @@ class StickyNote(QWidget):
             opacity_group = QActionGroup(opacity_menu)
             opacity_group.setExclusive(True)
         except Exception:
-            pass
+            logger.debug('创建透明度菜单组时出错', exc_info=True)
         for pct in [100, 90, 80, 70, 60, 50, 40, 30]:
             op_action = QAction(f'{pct}%', opacity_menu)
             op_action.setCheckable(True)
@@ -1697,7 +2238,7 @@ class StickyNote(QWidget):
                     self.hide_tab.removeEventFilter(self)
                     self.hide_tab.close()
                 except Exception:
-                    pass
+                    logger.debug('关闭隐藏标签页时出错', exc_info=True)
                 self.hide_tab = None
 
             position_manager = get_position_manager()

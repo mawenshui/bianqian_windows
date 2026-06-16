@@ -1,0 +1,73 @@
+/* Theme Name: 现代暗黑 */
+
+StickyNote {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+
+QLineEdit {
+    background-color: #313244;
+    border: 2px solid #cba6f7;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #cdd6f4;
+}
+
+QTextEdit {
+    background-color: #313244;
+    border: 2px solid #cba6f7;
+    border-radius: 5px;
+    padding: 5px;
+    font-family: "微软雅黑";
+    color: #cdd6f4;
+}
+
+QPushButton {
+    background-color: #45475a;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #585b70;
+}
+
+QSlider::handle:horizontal {
+    background-color: #cba6f7;
+    border: 1px solid #1e1e2e;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    font-family: "微软雅黑";
+    color: #cdd6f4;
+}
+
+QDialog {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+
+QComboBox {
+    background-color: #313244;
+    border: 1px solid #cba6f7;
+    border-radius: 5px;
+    padding: 5px;
+    color: #cdd6f4;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #cba6f7;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png);
+}

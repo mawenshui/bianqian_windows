@@ -145,6 +145,12 @@ class TemplateDialog(QDialog):
         self.setFixedSize(650, 450)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.initUI()
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception:
+            pass
 
     def initUI(self):
         layout = QHBoxLayout()

@@ -172,6 +172,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mgr._start_download_update = MagicMock()
             mgr._restore_manual_check_btn = MagicMock()
             mgr.save_settings = MagicMock()
+            mgr.config = MagicMock()
 
             mock_dialog = MagicMock()
             mock_dialog.action = 'later'
@@ -181,7 +182,7 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mgr._on_update_available(self.update_info)
 
             # 手动检查时仍应创建对话框
-            mock_dialog_cls.assert_called_once_with(self.update_info, '1.6.1')
+            mock_dialog_cls.assert_called_once_with(self.update_info, '1.7.0')
 
     def test_no_update_manual_shows_message(self):
         """手动检查无更新时显示提示"""
@@ -224,18 +225,18 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mgr._on_update_check_failed('Test error')
             mock_warn.assert_called_once()
 
-    def test_check_failed_auto_prints(self):
+    def test_check_failed_auto_logs(self):
         """自动检查失败输出日志"""
         from core.manager import StickyNoteManager
         with patch('core.manager.StickyNoteManager.__init__', return_value=None), \
-             patch('builtins.print') as mock_print:
+             patch('core.manager.logger.info') as mock_log:
 
             mgr = StickyNoteManager.__new__(StickyNoteManager)
             mgr._update_manual = False
             mgr._restore_manual_check_btn = MagicMock()
 
             mgr._on_update_check_failed('Test error')
-            mock_print.assert_called_once()
+            mock_log.assert_called_once()
 
     def test_start_download_empty_assets(self):
         """无资产时显示错误"""

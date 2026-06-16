@@ -6,15 +6,17 @@
 """
 
 import os
+from typing import Optional
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QTabWidget, QLabel, QComboBox, QCheckBox,
     QPushButton, QSpinBox, QLineEdit, QTextEdit, QFrame,
-    QFontComboBox, QWidget, QProgressBar
+    QFontComboBox, QWidget, QProgressBar, QMessageBox, QListWidget,
+    QScrollArea, QSizePolicy
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QObject
+from PyQt5.QtGui import QFont, QKeySequence
 
 from core import get_styles_dir, __version__
 
@@ -37,6 +39,12 @@ class SettingsDialog(QDialog):
         )
         self.setWindowModality(Qt.NonModal)
         self.initUI()
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception:
+            pass
 
     def initUI(self):
         self.setWindowTitle('\u8bbe\u7f6e')
@@ -55,6 +63,22 @@ class SettingsDialog(QDialog):
         update_tab = QWidget()
         self.setup_update_tab(update_tab)
         tab_widget.addTab(update_tab, "\u66f4\u65b0\u8bbe\u7f6e")
+
+        security_tab = QWidget()
+        self.setup_security_tab(security_tab)
+        tab_widget.addTab(security_tab, "安全设置")
+
+        sync_tab = QWidget()
+        self.setup_sync_tab(sync_tab)
+        tab_widget.addTab(sync_tab, "云同步")
+
+        plugins_tab = QWidget()
+        self.setup_plugins_tab(plugins_tab)
+        tab_widget.addTab(plugins_tab, "插件")
+
+        shortcuts_tab = QWidget()
+        self.setup_shortcuts_tab(shortcuts_tab)
+        tab_widget.addTab(shortcuts_tab, "快捷键")
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(tab_widget)
@@ -444,3 +468,562 @@ class SettingsDialog(QDialog):
         """行内'立即更新'按钮"""
         if hasattr(self, '_inline_update_info'):
             self.manager._start_download_update(self._inline_update_info)
+
+    # ==================== 安全设置 ====================
+
+    def setup_security_tab(self, tab_widget):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        # 主密码设置
+        master_group = QGroupBox("主密码")
+        master_layout = QVBoxLayout()
+
+        hint = QLabel("设置主密码后，每次启动应用时需要输入密码。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        master_layout.addWidget(hint)
+
+        self.master_pwd_checkbox = QCheckBox("启用主密码")
+        has_master = bool(self.manager.config.get('security.require_master_password', False))
+        self.master_pwd_checkbox.setChecked(has_master)
+        self.master_pwd_checkbox.stateChanged.connect(self._on_master_pwd_toggled)
+        master_layout.addWidget(self.master_pwd_checkbox)
+
+        btn_row = QHBoxLayout()
+        self.set_master_pwd_btn = QPushButton("设置/修改主密码")
+        self.set_master_pwd_btn.clicked.connect(self._on_set_master_password)
+        btn_row.addWidget(self.set_master_pwd_btn)
+        btn_row.addStretch()
+        master_layout.addLayout(btn_row)
+
+        master_group.setLayout(master_layout)
+        layout.addWidget(master_group)
+
+        # 加密说明
+        info_label = QLabel("ℹ️ 便签加密使用 AES-256-GCM，密钥通过 PBKDF2 派生（480000 轮）。\n"
+                           "密码哈希使用 Argon2id（回退到 PBKDF2）。")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #666; font-size: 9pt;")
+        layout.addWidget(info_label)
+
+        layout.addStretch()
+        tab_widget.setLayout(layout)
+
+    def _on_master_pwd_toggled(self):
+        enabled = self.master_pwd_checkbox.isChecked()
+        if enabled:
+            # 启用主密码 — 直接保存配置
+            self.manager.config.set('security.require_master_password', True)
+        else:
+            # 禁用主密码 — 需要先验证当前密码
+            master_hash = self.manager.config.get('security.master_password_hash', '')
+            master_salt_str = self.manager.config.get('security.master_password_salt', '')
+            
+            if not master_hash:
+                # 未设置密码，直接允许禁用
+                self.manager.config.set('security.require_master_password', False)
+                return
+            
+            # 要求用户输入当前主密码
+            import base64
+            from PyQt5.QtWidgets import QInputDialog, QLineEdit
+            password, ok = QInputDialog.getText(
+                self, '验证主密码',
+                '请输入当前主密码以确认禁用：',
+                QLineEdit.Password
+            )
+            if not ok or not password:
+                # 用户取消，恢复勾选状态
+                self.master_pwd_checkbox.blockSignals(True)
+                self.master_pwd_checkbox.setChecked(True)
+                self.master_pwd_checkbox.blockSignals(False)
+                return
+            
+            # 验证密码
+            from features.encryption import NoteEncryption
+            enc = NoteEncryption()
+            master_salt = None
+            if master_salt_str:
+                try:
+                    master_salt = base64.b64decode(master_salt_str)
+                except Exception:
+                    master_salt = None
+            
+            try:
+                if enc.verify_password(password, master_hash, master_salt):
+                    self.manager.config.set('security.require_master_password', False)
+                    QMessageBox.information(self, '已禁用', '主密码已禁用。')
+                else:
+                    QMessageBox.warning(self, '验证失败', '主密码不正确，无法禁用。')
+                    self.master_pwd_checkbox.blockSignals(True)
+                    self.master_pwd_checkbox.setChecked(True)
+                    self.master_pwd_checkbox.blockSignals(False)
+            except Exception:
+                QMessageBox.warning(self, '验证失败', '密码验证出错，无法禁用。')
+                self.master_pwd_checkbox.blockSignals(True)
+                self.master_pwd_checkbox.setChecked(True)
+                self.master_pwd_checkbox.blockSignals(False)
+
+    def _on_set_master_password(self):
+        try:
+            from features.lock_dialog import SetMasterPasswordDialog
+            dialog = SetMasterPasswordDialog(self)
+            if dialog.exec_() == SetMasterPasswordDialog.Accepted:
+                password = dialog.get_password()
+                if password:
+                    from features.encryption import NoteEncryption
+                    result = NoteEncryption.hash_master_password(password)
+                    self.manager.config.set('security.master_password_hash', result['hash'])
+                    self.manager.config.set('security.master_password_salt', result['salt'])
+                    self.manager.config.set('security.require_master_password', True)
+                    self.master_pwd_checkbox.setChecked(True)
+                    QMessageBox.information(self, '设置成功', '主密码已设置。')
+        except Exception as e:
+            QMessageBox.warning(self, '设置失败', f'设置主密码失败: {e}')
+
+    # ==================== 云同步 ====================
+
+    def setup_sync_tab(self, tab_widget):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # 启用同步
+        self.sync_enabled_cb = QCheckBox("启用云同步")
+        self.sync_enabled_cb.setChecked(self.manager.config.get('sync.enabled', False))
+        self.sync_enabled_cb.stateChanged.connect(self._on_sync_enabled_changed)
+        layout.addWidget(self.sync_enabled_cb)
+
+        # 同步提供商
+        provider_group = QGroupBox("同步提供商")
+        provider_layout = QFormLayout()
+
+        self.sync_provider_combo = QComboBox()
+        self.sync_provider_combo.addItems(['WebDAV (坚果云/Nextcloud)', '本地文件夹 (OneDrive)'])
+        provider = self.manager.config.get('sync.provider', 'webdav')
+        if provider == 'local':
+            self.sync_provider_combo.setCurrentIndex(1)
+        self.sync_provider_combo.currentIndexChanged.connect(self._on_sync_provider_changed)
+        provider_layout.addRow("提供商:", self.sync_provider_combo)
+        provider_group.setLayout(provider_layout)
+        layout.addWidget(provider_group)
+
+        # WebDAV 配置
+        webdav_group = QGroupBox("WebDAV 配置")
+        webdav_layout = QFormLayout()
+
+        self.webdav_url = QLineEdit()
+        self.webdav_url.setText(self.manager.config.get('sync.webdav.url', ''))
+        self.webdav_url.setPlaceholderText('https://dav.jianguoyun.com/dav/')
+        webdav_layout.addRow("服务器 URL:", self.webdav_url)
+
+        self.webdav_user = QLineEdit()
+        self.webdav_user.setText(self.manager.config.get('sync.webdav.username', ''))
+        webdav_layout.addRow("用户名:", self.webdav_user)
+
+        self.webdav_pwd = QLineEdit()
+        self.webdav_pwd.setEchoMode(QLineEdit.Password)
+        webdav_layout.addRow("密码:", self.webdav_pwd)
+
+        self.webdav_path = QLineEdit()
+        self.webdav_path.setText(self.manager.config.get('sync.webdav.remote_path', '/stickynote/'))
+        webdav_layout.addRow("远程路径:", self.webdav_path)
+
+        save_webdav_btn = QPushButton("保存 WebDAV 配置")
+        save_webdav_btn.clicked.connect(self._on_save_webdav)
+        webdav_layout.addRow(save_webdav_btn)
+
+        webdav_group.setLayout(webdav_layout)
+        layout.addWidget(webdav_group)
+
+        # 自动同步
+        auto_sync_layout = QHBoxLayout()
+        self.auto_sync_cb = QCheckBox("自动同步")
+        self.auto_sync_cb.setChecked(self.manager.config.get('sync.auto_sync', False))
+        self.auto_sync_cb.stateChanged.connect(self._on_auto_sync_changed)
+        auto_sync_layout.addWidget(self.auto_sync_cb)
+
+        auto_sync_layout.addWidget(QLabel("间隔:"))
+        self.sync_interval_spin = QSpinBox()
+        self.sync_interval_spin.setRange(5, 1440)
+        self.sync_interval_spin.setValue(self.manager.config.get('sync.sync_interval_minutes', 30))
+        self.sync_interval_spin.setSuffix(" 分钟")
+        self.sync_interval_spin.valueChanged.connect(self._on_sync_interval_changed)
+        auto_sync_layout.addWidget(self.sync_interval_spin)
+        auto_sync_layout.addStretch()
+        layout.addLayout(auto_sync_layout)
+
+        layout.addStretch()
+        tab_widget.setLayout(layout)
+
+    def _on_sync_enabled_changed(self):
+        self.manager.config.set('sync.enabled', self.sync_enabled_cb.isChecked())
+
+    def _on_sync_provider_changed(self, idx):
+        provider = 'local' if idx == 1 else 'webdav'
+        self.manager.config.set('sync.provider', provider)
+
+    def _on_save_webdav(self):
+        self.manager.config.set('sync.webdav.url', self.webdav_url.text())
+        self.manager.config.set('sync.webdav.username', self.webdav_user.text())
+        self.manager.config.set('sync.webdav.password_encrypted', self.webdav_pwd.text())
+        self.manager.config.set('sync.webdav.remote_path', self.webdav_path.text())
+        QMessageBox.information(self, '保存成功', 'WebDAV 配置已保存。')
+
+    def _on_auto_sync_changed(self):
+        self.manager.config.set('sync.auto_sync', self.auto_sync_cb.isChecked())
+
+    def _on_sync_interval_changed(self, val):
+        self.manager.config.set('sync.sync_interval_minutes', val)
+
+    # ==================== 插件设置 ====================
+
+    def setup_plugins_tab(self, tab_widget):
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # 启用开关
+        self.plugins_enabled_cb = QCheckBox("启用插件系统")
+        self.plugins_enabled_cb.setChecked(self.manager.config.get('plugins.enabled', True))
+        self.plugins_enabled_cb.stateChanged.connect(self._on_plugins_enabled_changed)
+        layout.addWidget(self.plugins_enabled_cb)
+
+        # 获取已加载插件
+        plugins_list = []
+        if hasattr(self.manager, 'plugin_registry'):
+            plugins_list = self.manager.plugin_registry.list_plugins()
+
+        if not plugins_list:
+            no_plugin = QLabel("（暂无已加载的插件）")
+            no_plugin.setStyleSheet("color: #999; font-style: italic; padding: 20px;")
+            no_plugin.setAlignment(Qt.AlignCenter)
+            layout.addWidget(no_plugin)
+        else:
+            # 存储每个插件的动态控件引用
+            self._plugin_config_widgets = {}
+
+            for plugin_name, plugin in plugins_list:
+                fields = plugin.get_config_fields()
+                if not fields:
+                    # 无配置项的插件只显示信息
+                    info_group = QGroupBox(f"{plugin_name} v{plugin.version}")
+                    info_layout = QVBoxLayout()
+                    desc_label = QLabel(plugin.description)
+                    desc_label.setWordWrap(True)
+                    desc_label.setStyleSheet("color: #666;")
+                    info_layout.addWidget(desc_label)
+                    info_group.setLayout(info_layout)
+                    layout.addWidget(info_group)
+                    continue
+
+                # 有配置项的插件
+                plugin_group = QGroupBox(f"{plugin_name} v{plugin.version}")
+                plugin_layout = QVBoxLayout()
+                plugin_layout.setSpacing(8)
+
+                desc_label = QLabel(plugin.description)
+                desc_label.setWordWrap(True)
+                desc_label.setStyleSheet("color: #666; font-size: 9pt;")
+                plugin_layout.addWidget(desc_label)
+
+                form_layout = QFormLayout()
+                form_layout.setSpacing(6)
+
+                field_widgets = {}
+
+                for field in fields:
+                    key = field['key']
+                    label = field.get('label', key)
+                    ftype = field.get('type', 'text')
+                    default = field.get('default', '')
+                    current_value = plugin.config.get(key, default)
+
+                    if ftype == 'bool':
+                        w = QCheckBox()
+                        w.setChecked(bool(current_value))
+                        form_layout.addRow(label, w)
+
+                    elif ftype == 'select':
+                        w = QComboBox()
+                        options = field.get('options', [])
+                        w.addItems([str(o) for o in options])
+                        idx = w.findText(str(current_value))
+                        if idx >= 0:
+                            w.setCurrentIndex(idx)
+                        form_layout.addRow(label, w)
+
+                    elif ftype == 'int':
+                        w = QSpinBox()
+                        w.setRange(field.get('min', 0), field.get('max', 9999))
+                        w.setValue(int(current_value) if current_value else default)
+                        suffix = field.get('suffix', '')
+                        if suffix:
+                            w.setSuffix(f' {suffix}')
+                        form_layout.addRow(label, w)
+
+                    else:  # 'text' or default
+                        w = QLineEdit()
+                        w.setText(str(current_value))
+                        w.setPlaceholderText(str(default))
+                        form_layout.addRow(label, w)
+
+                    # 帮助提示
+                    help_text = field.get('help', '')
+                    if help_text:
+                        help_label = QLabel(f'  {help_text}')
+                        help_label.setStyleSheet("color: #999; font-size: 8pt;")
+                        form_layout.addRow('', help_label)
+
+                    field_widgets[key] = (ftype, w)
+
+                plugin_layout.addLayout(form_layout)
+
+                # 保存按钮
+                save_btn = QPushButton('保存配置')
+                save_btn.setFixedWidth(100)
+                save_btn.clicked.connect(
+                    lambda checked, pn=plugin_name, pi=plugin, fw=field_widgets:
+                    self._save_plugin_config(pn, pi, fw)
+                )
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
+                btn_row.addWidget(save_btn)
+                plugin_layout.addLayout(btn_row)
+
+                plugin_group.setLayout(plugin_layout)
+                layout.addWidget(plugin_group)
+
+                self._plugin_config_widgets[plugin_name] = (plugin, field_widgets)
+
+        layout.addStretch()
+
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
+        tab_widget.setLayout(outer_layout)
+
+    def _save_plugin_config(self, plugin_name, plugin, field_widgets):
+        """保存单个插件的配置"""
+        new_config = {}
+        for key, (ftype, widget) in field_widgets.items():
+            if ftype == 'bool':
+                new_config[key] = widget.isChecked()
+            elif ftype == 'select':
+                new_config[key] = widget.currentText()
+            elif ftype == 'int':
+                new_config[key] = widget.value()
+            else:
+                new_config[key] = widget.text()
+
+        # 保存到持久化存储
+        self.manager.plugin_api.set_plugin_config(plugin_name, new_config)
+
+        # 更新插件实例的 config 字典
+        plugin.config.update(new_config)
+
+        # 通知插件配置已变更
+        for key, value in new_config.items():
+            plugin.on_config_changed(key, value)
+
+        QMessageBox.information(self, '配置已保存', f'{plugin_name} 的配置已保存。')
+
+    def _on_plugins_enabled_changed(self):
+        self.manager.config.set('plugins.enabled', self.plugins_enabled_cb.isChecked())
+
+    # ==================== 快捷键设置 ====================
+
+    def setup_shortcuts_tab(self, tab_widget):
+        """构建快捷键设置标签页"""
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        hint = QLabel('自定义全局快捷键。点击“录制”后按下新的快捷键组合。')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: #888;')
+        layout.addWidget(hint)
+
+        # 快捷键列表
+        shortcuts_group = QGroupBox('全局快捷键')
+        shortcuts_layout = QFormLayout()
+        shortcuts_layout.setSpacing(10)
+
+        # 默认快捷键定义
+        default_shortcuts = {
+            'add_note': ('新建便签', 'Ctrl+Shift+N'),
+            'show_search_dialog': ('搜索便签', 'Ctrl+Shift+F'),
+            'show_backup_dialog': ('备份管理', 'Ctrl+Shift+B'),
+            'show_group_view': ('分组视图', 'Ctrl+Shift+G'),
+        }
+
+        self._shortcut_editors = {}
+
+        for action_name, (label_text, default_combo) in default_shortcuts.items():
+            # 从配置读取当前值
+            current = self.manager.config.get(f'shortcuts.{action_name}', default_combo)
+
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(8)
+
+            combo_label = QLabel(current)
+            combo_label.setFixedWidth(160)
+            combo_label.setStyleSheet(
+                'QLabel { background-color: #f5f5f5; border: 1px solid #ccc; '
+                'border-radius: 3px; padding: 4px 8px; font-family: Consolas, monospace; }'
+            )
+
+            record_btn = QPushButton('录制')
+            record_btn.setFixedSize(60, 28)
+
+            reset_btn = QPushButton('重置')
+            reset_btn.setFixedSize(50, 28)
+
+            # 录制按钮逻辑
+            def _start_record(lbl, btn, action, default):
+                btn.setText('按下...')
+                btn.setEnabled(False)
+                self._recording_shortcut = True
+                self._record_target = (lbl, btn, action, default)
+                # 安装事件过滤器
+                self.installEventFilter(self._ShortcutRecorder(self, lbl, btn, action))
+
+            def _reset_shortcut(lbl, btn, action, default):
+                lbl.setText(default)
+                self.manager.config.set(f'shortcuts.{action}', default)
+                QMessageBox.information(self, '已重置', f'快捷键已重置为 {default}')
+
+            record_btn.clicked.connect(
+                lambda checked, l=combo_label, b=record_btn, a=action_name, d=default_combo:
+                _start_record(l, b, a, d)
+            )
+            reset_btn.clicked.connect(
+                lambda checked, l=combo_label, b=record_btn, a=action_name, d=default_combo:
+                _reset_shortcut(l, b, a, d)
+            )
+
+            row_layout.addWidget(combo_label)
+            row_layout.addWidget(record_btn)
+            row_layout.addWidget(reset_btn)
+            row_layout.addStretch()
+
+            row_widget = QWidget()
+            row_widget.setLayout(row_layout)
+            shortcuts_layout.addRow(f'{label_text}:', row_widget)
+
+            self._shortcut_editors[action_name] = (combo_label, record_btn)
+
+        shortcuts_group.setLayout(shortcuts_layout)
+        layout.addWidget(shortcuts_group)
+
+        # 提示
+        note = QLabel('提示：快捷键组合必须包含 Ctrl、Shift 或 Alt 修饰键。\n'
+                     '修改后需要重启应用才能生效。')
+        note.setStyleSheet('color: #999; font-size: 9pt;')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        # 保存按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        apply_btn = QPushButton('保存快捷键')
+        apply_btn.setStyleSheet(
+            'QPushButton { background-color: #4a86e8; color: white; padding: 6px 16px; '
+            'font-weight: bold; border-radius: 4px; }'
+            'QPushButton:hover { background-color: #3a76d8; }'
+        )
+
+        def _save_shortcuts():
+            for action_name, (label, _) in self._shortcut_editors.items():
+                self.manager.config.set(f'shortcuts.{action_name}', label.text())
+            QMessageBox.information(self, '已保存', '快捷键配置已保存。重启应用后生效。')
+
+        apply_btn.clicked.connect(_save_shortcuts)
+        btn_layout.addWidget(apply_btn)
+        layout.addLayout(btn_layout)
+
+        layout.addStretch()
+        tab_widget.setLayout(layout)
+
+    class _ShortcutRecorder(QObject):
+        """快捷键录制事件过滤器"""
+
+        def __init__(self, parent_dialog, label, button, action_name):
+            super().__init__(parent_dialog)
+            self.label = label
+            self.button = button
+            self.action_name = action_name
+            self.parent_dialog = parent_dialog
+
+        def eventFilter(self, obj, event):
+            from PyQt5.QtCore import QEvent
+            if event.type() == QEvent.KeyPress:
+                modifiers = event.modifiers()
+                key = event.key()
+
+                # 忽略单独的修饰键
+                if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+                    return True
+
+                parts = []
+                if modifiers & Qt.ControlModifier:
+                    parts.append('Ctrl')
+                if modifiers & Qt.ShiftModifier:
+                    parts.append('Shift')
+                if modifiers & Qt.AltModifier:
+                    parts.append('Alt')
+
+                # 获取按键名称
+                key_text = QKeySequence(key).toString()
+                if key_text:
+                    parts.append(key_text)
+
+                combo = '+'.join(parts)
+
+                # 冲突检测
+                conflict = self._check_conflict(combo)
+                if conflict:
+                    reply = QMessageBox.question(
+                        self.parent_dialog, '快捷键冲突',
+                        f'快捷键 {combo} 已被“{conflict}”使用。\n是否覆盖？',
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply != QMessageBox.Yes:
+                        self.button.setText('录制')
+                        self.button.setEnabled(True)
+                        self.parent_dialog.removeEventFilter(self)
+                        return True
+
+                self.label.setText(combo)
+                self.button.setText('录制')
+                self.button.setEnabled(True)
+                self.parent_dialog.removeEventFilter(self)
+                return True
+            return False
+
+        def _check_conflict(self, combo: str) -> Optional[str]:
+            """检查快捷键是否与其他动作冲突"""
+            if not hasattr(self.parent_dialog, '_shortcut_editors'):
+                return None
+            for action_name, (label, _) in self.parent_dialog._shortcut_editors.items():
+                if action_name != self.action_name and label.text() == combo:
+                    # 查找动作名称
+                    names = {
+                        'add_note': '新建便签',
+                        'show_search_dialog': '搜索便签',
+                        'show_backup_dialog': '备份管理',
+                        'show_group_view': '分组视图',
+                    }
+                    return names.get(action_name, action_name)
+            return None
+

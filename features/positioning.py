@@ -7,9 +7,14 @@
 
 import os
 import json
+import logging
+import shutil
+from typing import Any, Dict, List, Optional, Set, Tuple
 from PyQt5.QtWidgets import QApplication, QDesktopWidget
 from PyQt5.QtCore import QRect, QPoint, QSize
 from PyQt5.QtGui import QScreen
+
+logger = logging.getLogger(__name__)
 
 
 class WindowPositionManager:
@@ -19,7 +24,7 @@ class WindowPositionManager:
     管理便签窗口的智能定位和排列
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
         """
         初始化窗口位置管理器
         """
@@ -41,7 +46,7 @@ class WindowPositionManager:
         # 加载位置历史
         self.position_history = self.load_position_history()
     
-    def get_smart_position(self, note_id=None, window_size=None):
+    def get_smart_position(self, note_id: Optional[int] = None, window_size: Optional[QSize] = None) -> QPoint:
         """
         获取智能窗口位置
         
@@ -72,7 +77,7 @@ class WindowPositionManager:
         
         return best_position
     
-    def get_available_screen_area(self):
+    def get_available_screen_area(self) -> QRect:
         """
         获取可用的屏幕区域（排除任务栏等）
         
@@ -87,7 +92,7 @@ class WindowPositionManager:
         
         return available_geometry
     
-    def find_best_position(self, available_rect, window_size):
+    def find_best_position(self, available_rect: QRect, window_size: QSize) -> QPoint:
         """
         在可用区域内找到最佳窗口位置
         
@@ -128,7 +133,7 @@ class WindowPositionManager:
         offset = len(self.occupied_positions) * 30
         return QPoint(center_x + offset, center_y + offset)
     
-    def get_position_priority_order(self, available_rect, grid_width, grid_height, cols, rows):
+    def get_position_priority_order(self, available_rect: QRect, grid_width: int, grid_height: int, cols: int, rows: int) -> List[QPoint]:
         """
         获取位置优先级顺序
         
@@ -153,7 +158,7 @@ class WindowPositionManager:
         
         return positions
     
-    def is_position_valid(self, position, window_size):
+    def is_position_valid(self, position: QPoint, window_size: QSize) -> bool:
         """
         检查位置是否有效（在屏幕范围内）
         
@@ -170,7 +175,7 @@ class WindowPositionManager:
         # 检查窗口是否完全在可用区域内
         return available_rect.contains(window_rect)
     
-    def is_position_occupied(self, window_rect):
+    def is_position_occupied(self, window_rect: QRect) -> bool:
         """
         检查位置是否被占用
         
@@ -189,7 +194,7 @@ class WindowPositionManager:
         
         return False
     
-    def register_window_position(self, note_id, position, size):
+    def register_window_position(self, note_id: Optional[int], position: QPoint, size: QSize) -> None:
         """
         注册窗口位置
         
@@ -211,7 +216,7 @@ class WindowPositionManager:
             }
             self.save_position_history()
     
-    def unregister_window_position(self, note_id, position, size):
+    def unregister_window_position(self, note_id: int, position: QPoint, size: QSize) -> None:
         """
         注销窗口位置
         
@@ -224,7 +229,7 @@ class WindowPositionManager:
         occupied_tuple = (position.x(), position.y(), size.width(), size.height())
         self.occupied_positions.discard(occupied_tuple)
     
-    def update_window_position(self, note_id, old_position, old_size, new_position, new_size):
+    def update_window_position(self, note_id: int, old_position: QPoint, old_size: QSize, new_position: QPoint, new_size: QSize) -> None:
         """
         更新窗口位置
         
@@ -241,7 +246,7 @@ class WindowPositionManager:
         # 注册新位置
         self.register_window_position(note_id, new_position, new_size)
     
-    def get_cascade_position(self, base_position, index):
+    def get_cascade_position(self, base_position: QPoint, index: int) -> QPoint:
         """
         获取层叠位置
         
@@ -255,7 +260,7 @@ class WindowPositionManager:
         offset = index * 30  # 每个窗口偏移30像素
         return QPoint(base_position.x() + offset, base_position.y() + offset)
     
-    def arrange_windows_grid(self, window_list, cols=None):
+    def arrange_windows_grid(self, window_list: List[Any], cols: Optional[int] = None) -> None:
         """
         网格排列窗口
         
@@ -287,7 +292,7 @@ class WindowPositionManager:
                 if y + self.default_window_size.height() <= available_rect.bottom():
                     window.move(x, y)
     
-    def arrange_windows_cascade(self, window_list):
+    def arrange_windows_cascade(self, window_list: List[Any]) -> None:
         """
         层叠排列窗口
         
@@ -314,7 +319,7 @@ class WindowPositionManager:
                 # 如果超出屏幕，重新开始
                 window.move(start_x, start_y)
     
-    def snap_to_edges(self, window_rect, snap_distance=20):
+    def snap_to_edges(self, window_rect: QRect, snap_distance: int = 20) -> QRect:
         """
         窗口边缘吸附
         
@@ -347,7 +352,7 @@ class WindowPositionManager:
         
         return new_rect
     
-    def get_next_available_position(self, window_size=None):
+    def get_next_available_position(self, window_size: Optional[QSize] = None) -> QPoint:
         """
         获取下一个可用位置
         
@@ -362,7 +367,7 @@ class WindowPositionManager:
         
         return self.get_smart_position(window_size=window_size)
     
-    def load_position_history(self):
+    def load_position_history(self) -> Dict[str, Any]:
         """
         加载位置历史
         
@@ -375,7 +380,7 @@ class WindowPositionManager:
                     raw_data = json.load(f)
                 
                 if not isinstance(raw_data, dict):
-                    print("位置历史文件格式错误，已重置")
+                    logger.warning("位置历史文件格式错误，已重置")
                     return {}
                 
                 # JSON key 都是字符串，转换为 int 以保持与 note_id 类型一致
@@ -383,7 +388,7 @@ class WindowPositionManager:
                 result = {}
                 for k, v in raw_data.items():
                     if not isinstance(v, dict) or 'x' not in v or 'y' not in v:
-                        print(f"跳过无效的位置记录: key={k}")
+                        logger.debug(f"跳过无效的位置记录: key={k}")
                         continue
                     try:
                         result[int(k)] = v
@@ -397,14 +402,14 @@ class WindowPositionManager:
                 
                 return result
             except json.JSONDecodeError as e:
-                print(f"位置历史文件 JSON 解析失败，已重置: {e}")
+                logger.warning(f"位置历史文件 JSON 解析失败，已重置: {e}")
                 self._backup_corrupt_file()
             except Exception as e:
-                print(f"加载位置历史时出错: {e}")
+                logger.error(f"加载位置历史时出错: {e}")
         
         return {}
     
-    def _backup_corrupt_file(self):
+    def _backup_corrupt_file(self) -> None:
         """
         备份损坏的位置历史文件，避免数据彻底丢失
         """
@@ -413,11 +418,11 @@ class WindowPositionManager:
                 backup_path = self.position_history_file + '.bak'
                 import shutil
                 shutil.copy2(self.position_history_file, backup_path)
-                print(f"已备份损坏的位置历史到: {backup_path}")
+                logger.info(f"已备份损坏的位置历史到: {backup_path}")
         except Exception as e:
-            print(f"备份位置历史文件失败: {e}")
+            logger.warning(f"备份位置历史文件失败: {e}")
     
-    def save_position_history(self):
+    def save_position_history(self) -> None:
         """
         保存位置历史
         
@@ -431,7 +436,7 @@ class WindowPositionManager:
             for k, v in self.position_history.items():
                 str_k = str(k)
                 if str_k in seen_keys:
-                    print(f"检测到重复 key '{str_k}'，保留最新值")
+                    logger.warning(f"检测到重复 key '{str_k}'，保留最新值")
                 seen_keys.add(str_k)
                 str_keyed[str_k] = v
             
@@ -446,7 +451,7 @@ class WindowPositionManager:
             else:
                 os.rename(tmp_path, self.position_history_file)
         except Exception as e:
-            print(f"保存位置历史时出错: {e}")
+            logger.error(f"保存位置历史时出错: {e}")
             # 清理可能残留的临时文件
             tmp_path = self.position_history_file + '.tmp'
             if os.path.exists(tmp_path):
@@ -455,7 +460,7 @@ class WindowPositionManager:
                 except OSError:
                     pass
     
-    def clear_position_history(self):
+    def clear_position_history(self) -> None:
         """
         清除位置历史
         """
@@ -466,9 +471,9 @@ class WindowPositionManager:
             try:
                 os.remove(self.position_history_file)
             except Exception as e:
-                print(f"删除位置历史文件时出错: {e}")
+                logger.warning(f"删除位置历史文件时出错: {e}")
     
-    def get_screen_info(self):
+    def get_screen_info(self) -> Dict[str, int]:
         """
         获取屏幕信息
         
@@ -489,7 +494,7 @@ class WindowPositionManager:
             'dpi': primary_screen.logicalDotsPerInch()
         }
     
-    def is_window_visible(self, window_rect):
+    def is_window_visible(self, window_rect: QRect) -> bool:
         """
         检查窗口是否在可见区域内
         
@@ -504,7 +509,7 @@ class WindowPositionManager:
         # 检查窗口是否至少有一部分在可见区域内
         return window_rect.intersects(available_rect)
     
-    def move_window_to_visible_area(self, window_rect):
+    def move_window_to_visible_area(self, window_rect: QRect) -> QRect:
         """
         将窗口移动到可见区域
         
@@ -540,7 +545,7 @@ class WindowPositionManager:
 _position_manager = None
 
 
-def get_position_manager():
+def get_position_manager() -> WindowPositionManager:
     """
     获取全局位置管理器实例
     

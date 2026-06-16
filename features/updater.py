@@ -31,7 +31,11 @@ from core import get_project_root
 # ==================== 常量 ====================
 
 GITHUB_REPO = 'mawenshui/bianqian_windows'
-GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
+# 版本检查端点列表（按优先级排序，依次尝试）
+VERSION_CHECK_ENDPOINTS = [
+    ('GitHub API', f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'),
+    ('GitHub 镜像', f'https://ghfast.top/https://api.github.com/repos/{GITHUB_REPO}/releases/latest'),
+]
 
 # 下载超时（秒）
 GITHUB_DOWNLOAD_TIMEOUT = 60       # GitHub 主链接
@@ -126,57 +130,69 @@ class UpdateChecker(QThread):
         self._aborted = True
     
     def run(self):
-        try:
-            self.status_update.emit('正在连接 GitHub...')
-            req = urllib.request.Request(
-                GITHUB_API_LATEST,
-                headers={'Accept': 'application/vnd.github+json'}
-            )
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                if self._aborted:
-                    self.check_failed.emit('检查已取消')
-                    return
-                self.status_update.emit('正在解析版本信息...')
-                data = json.loads(resp.read().decode())
-            
+        """依次尝试多个端点检查更新，任一成功即返回"""
+        last_error = ''
+        for endpoint_name, endpoint_url in VERSION_CHECK_ENDPOINTS:
             if self._aborted:
                 self.check_failed.emit('检查已取消')
                 return
-            
-            tag_name = data.get('tag_name', '')
-            latest_version = parse_version(tag_name)
-            current_version = parse_version(self._current_version)
-            
-            if latest_version > current_version:
-                self.update_available.emit({
-                    'version': '.'.join(map(str, latest_version)),
-                    'tag': tag_name,
-                    'body': data.get('body', ''),
-                    'html_url': data.get('html_url', ''),
-                    'assets': data.get('assets', []),
-                })
-            else:
-                self.no_update.emit()
+            try:
+                self.status_update.emit(f'正在通过 {endpoint_name} 检查更新...')
+                req = urllib.request.Request(
+                    endpoint_url,
+                    headers={'Accept': 'application/vnd.github+json'}
+                )
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    if self._aborted:
+                        self.check_failed.emit('检查已取消')
+                        return
+                    self.status_update.emit('正在解析版本信息...')
+                    data = json.loads(resp.read().decode())
                 
-        except (urllib.error.URLError, socket.timeout) as e:
-            if self._aborted:
-                self.check_failed.emit('检查已取消')
-            else:
-                self.check_failed.emit(f'网络连接失败: {e}')
-        except urllib.error.HTTPError as e:
-            if self._aborted:
-                self.check_failed.emit('检查已取消')
-            elif e.code == 403:
-                self.check_failed.emit('GitHub API 请求受限 (403)，请稍后重试')
-            else:
-                self.check_failed.emit(f'服务器错误 (HTTP {e.code})')
-        except json.JSONDecodeError:
-            self.check_failed.emit('服务器返回数据格式异常')
-        except Exception as e:
-            if self._aborted:
-                self.check_failed.emit('检查已取消')
-            else:
-                self.check_failed.emit(f'检查更新时发生未知错误: {e}')
+                if self._aborted:
+                    self.check_failed.emit('检查已取消')
+                    return
+                
+                tag_name = data.get('tag_name', '')
+                latest_version = parse_version(tag_name)
+                current_version = parse_version(self._current_version)
+                
+                if latest_version > current_version:
+                    self.update_available.emit({
+                        'version': '.'.join(map(str, latest_version)),
+                        'tag': tag_name,
+                        'body': data.get('body', ''),
+                        'html_url': data.get('html_url', ''),
+                        'assets': data.get('assets', []),
+                    })
+                else:
+                    self.no_update.emit()
+                return  # 成功，直接返回
+                
+            except (urllib.error.URLError, socket.timeout) as e:
+                last_error = f'{endpoint_name} 连接失败: {e}'
+                continue  # 尝试下一个端点
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    last_error = f'{endpoint_name} API 请求受限 (403)'
+                else:
+                    last_error = f'{endpoint_name} 服务器错误 (HTTP {e.code})'
+                continue
+            except json.JSONDecodeError:
+                last_error = f'{endpoint_name} 返回数据格式异常'
+                continue
+            except Exception as e:
+                if self._aborted:
+                    self.check_failed.emit('检查已取消')
+                    return
+                last_error = f'{endpoint_name} 未知错误: {e}'
+                continue
+        
+        # 所有端点都失败
+        if self._aborted:
+            self.check_failed.emit('检查已取消')
+        else:
+            self.check_failed.emit(f'所有检查端点均失败: {last_error}')
 
 
 # ==================== UpdateDownloader ====================
@@ -459,10 +475,10 @@ echo [%date% %time%] ZIP extraction complete. >> "%LOGFILE%"
 :: ===== Step 3: Find extracted source directory =====
 :: 优先检测扁平结构（StickyNote.exe 直接在解压目录下）
 set SRC_DIR=%EXTRACT_DIR%
-if exist "%EXTRACT_DIR%\StickyNote.exe" goto :found_src
+if exist "%EXTRACT_DIR%\\StickyNote.exe" goto :found_src
 :: 否则查找子目录中的 StickyNote.exe（兼容带根文件夹的 ZIP）
-for /d %%d in ("%EXTRACT_DIR%\*") do (
-    if exist "%%d\StickyNote.exe" (
+for /d %%d in ("%EXTRACT_DIR%\\*") do (
+    if exist "%%d\\StickyNote.exe" (
         set SRC_DIR=%%d
         goto :found_src
     )

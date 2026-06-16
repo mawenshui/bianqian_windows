@@ -14,9 +14,11 @@ StickyNoteManager 是整个应用的中央控制器，负责：
 import sys
 import os
 import json
+import logging
 import winreg
 import urllib.request
 from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from PyQt5.QtWidgets import (
     QApplication, QMessageBox, QMenu, QAction, QSystemTrayIcon
@@ -28,6 +30,9 @@ from PyQt5.QtWidgets import QStyle
 from core.note import StickyNote, NoteLoadWorker
 from core.settings import SettingsDialog
 from core import get_project_root, get_styles_dir, get_user_data_dir, __version__
+from core.config import get_config
+
+logger = logging.getLogger(__name__)
 from features.search import SearchManager
 from features.shortcuts import ShortcutManager
 from features.backup import BackupManager
@@ -36,6 +41,10 @@ from features.reminder import ReminderManager
 from features.tag import TagManager
 from features.import_export import ImportExportDialog
 from features.template import TemplateManager
+from features.linking import NoteLinkManager
+from features.plugin_system.registry import PluginRegistry
+from features.plugin_system.loader import PluginLoader
+from features.plugin_system.api import PluginAPI
 from features.updater import (
     UpdateChecker, UpdateDownloader, UpdateDialog, UpdateProgressDialog,
     detect_install_type, execute_update
@@ -49,8 +58,13 @@ class StickyNoteManager:
     单例模式（通常全局只有一个实例），管理所有便签窗口和应用状态。
     """
 
-    def __init__(self):
-        self.app = QApplication(sys.argv)
+    def __init__(self) -> None:
+        # 复用已存在的 QApplication 实例（main.py 中已创建），避免重复创建导致 QObject 被销毁
+        existing_app = QApplication.instance()
+        if existing_app is not None:
+            self.app = existing_app
+        else:
+            self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
 
         # 设置应用图标
@@ -64,26 +78,37 @@ class StickyNoteManager:
         self.notes = {}
         self.notes_dir = os.path.join(get_user_data_dir(), 'notes')
         os.makedirs(self.notes_dir, exist_ok=True)
+        logger.info(f'便签数据目录: {self.notes_dir}')
 
-        # 加载设置
-        self.settings_file = os.path.join(get_user_data_dir(), 'settings.json')
-        self.settings = self.load_settings()
-
+        # 加载设置（使用 ConfigManager 统一管理，支持原子写入）
+        self.config = get_config()
+        self.settings = self.config.get_all()  # 保持向后兼容的快捷访问
+        self.settings_file = self.config._settings_file  # 桥接给 feature 模块使用
+        
         if 'font' not in self.settings:
-            self.settings['font'] = {
-                'family': '\u5fae\u8f6f\u96c5\u9ed1', 'size': 12,
+            self.config.set('font', {
+                'family': '微软雅黑', 'size': 12,
                 'bold': False, 'italic': False
-            }
-            self.save_settings()
+            })
 
-        # 初始化功能模块
+        # 初始化核心功能模块（启动必需）
         self.search_manager = SearchManager(self)
         self.shortcut_manager = ShortcutManager()
         self.backup_manager = BackupManager(self)
         self.position_manager = get_position_manager()
-        self.reminder_manager = ReminderManager(self)
-        self.tag_manager = TagManager(self)
-        self.template_manager = TemplateManager(self)
+
+        # 延迟加载非关键功能模块（优化启动速度）
+        self._reminder_manager = None
+        self._tag_manager = None
+        self._template_manager = None
+        self._link_manager = None
+        QTimer.singleShot(500, self._init_deferred_modules)  # 500ms 后加载
+
+        # 插件系统（延迟加载）
+        self._plugin_registry = None
+        self._plugin_api = None
+        self._plugin_loader = None
+        QTimer.singleShot(1000, self._init_deferred_plugins)  # 1s 后加载
 
         # 注册全局快捷键
         self.setup_global_shortcuts()
@@ -105,43 +130,144 @@ class StickyNoteManager:
         if self.settings.get('auto_check_update', True):
             QTimer.singleShot(3000, lambda: self.check_for_updates(manual=False))
 
+        # 初始化主题文件热加载（延迟1秒）
+        QTimer.singleShot(1000, self._init_theme_watcher)
+
+    # ==================== 延迟加载 ====================
+
+    @property
+    def reminder_manager(self):
+        """延迟加载提醒管理器"""
+        if self._reminder_manager is None:
+            self._init_deferred_modules()
+        return self._reminder_manager
+
+    @property
+    def tag_manager(self):
+        """延迟加载标签管理器"""
+        if self._tag_manager is None:
+            self._init_deferred_modules()
+        return self._tag_manager
+
+    @property
+    def template_manager(self):
+        """延迟加载模板管理器"""
+        if self._template_manager is None:
+            self._init_deferred_modules()
+        return self._template_manager
+
+    @property
+    def link_manager(self):
+        """延迟加载链接管理器"""
+        if self._link_manager is None:
+            self._init_deferred_modules()
+        return self._link_manager
+
+    @property
+    def plugin_registry(self):
+        """延迟加载插件注册表"""
+        if self._plugin_registry is None:
+            self._init_deferred_plugins()
+        return self._plugin_registry
+
+    @property
+    def plugin_api(self):
+        """延迟加载插件 API"""
+        if self._plugin_api is None:
+            self._init_deferred_plugins()
+        return self._plugin_api
+
+    @property
+    def plugin_loader(self):
+        """延迟加载插件加载器"""
+        if self._plugin_loader is None:
+            self._init_deferred_plugins()
+        return self._plugin_loader
+
+    def _init_deferred_modules(self) -> None:
+        """初始化延迟加载的功能模块"""
+        if self._reminder_manager is None:
+            self._reminder_manager = ReminderManager(self)
+            logger.debug('延迟初始化: ReminderManager')
+        if self._tag_manager is None:
+            self._tag_manager = TagManager(self)
+            logger.debug('延迟初始化: TagManager')
+        if self._template_manager is None:
+            self._template_manager = TemplateManager(self)
+            logger.debug('延迟初始化: TemplateManager')
+        if self._link_manager is None:
+            self._link_manager = NoteLinkManager(self.notes_dir)
+            logger.debug('延迟初始化: NoteLinkManager')
+
+    def _init_deferred_plugins(self) -> None:
+        """初始化延迟加载的插件系统"""
+        if self._plugin_registry is None:
+            self._plugin_registry = PluginRegistry()
+        if self._plugin_api is None:
+            self._plugin_api = PluginAPI(self)
+        if self._plugin_loader is None:
+            plugins_dir = os.path.join(get_project_root(), 'plugins')
+            self._plugin_loader = PluginLoader(plugins_dir, self._plugin_api)
+            if self.config.get('plugins.enabled', True):
+                try:
+                    disabled = self.config.get('plugins.disabled', [])
+                    loaded = self._plugin_loader.load_all_enabled(
+                        [p for p in self._plugin_loader.discover_plugins() if p not in disabled]
+                    )
+                    for name, instance in loaded.items():
+                        self._plugin_registry.register_plugin_instance(name, instance)
+                except Exception as e:
+                    logger.error(f'加载插件时出错: {e}')
+            logger.debug('延迟初始化: 插件系统')
+
     # ==================== 全局快捷键 ====================
 
-    def setup_global_shortcuts(self):
+    def setup_global_shortcuts(self) -> None:
         try:
             ok_count = 0
             fail_count = 0
-            for combo, action in [
-                ('Ctrl+Shift+N', 'add_note'),
-                ('Ctrl+Shift+F', 'show_search_dialog'),
-                ('Ctrl+Shift+B', 'show_backup_dialog'),
-            ]:
+            # 默认快捷键
+            default_shortcuts = {
+                'add_note': 'Ctrl+Shift+N',
+                'show_search_dialog': 'Ctrl+Shift+F',
+                'show_backup_dialog': 'Ctrl+Shift+B',
+                'show_group_view': 'Ctrl+Shift+G',
+            }
+            for action, default_combo in default_shortcuts.items():
+                # 从配置读取自定义快捷键
+                combo = self.config.get(f'shortcuts.{action}', default_combo)
                 if self.shortcut_manager.register_global_shortcut(combo, action):
                     ok_count += 1
                 else:
                     fail_count += 1
             self.shortcut_manager.shortcut_activated.connect(self.handle_shortcut_activated)
             if fail_count >= 2:
-                print(f'提示: {fail_count}/{ok_count + fail_count} 个全局快捷键未能注册，应用仍可正常使用（通过托盘菜单操作）')
+                logger.warning(f'提示: {fail_count}/{ok_count + fail_count} 个全局快捷键未能注册，应用仍可正常使用（通过托盘菜单操作）')
         except Exception as e:
-            print(f'设置全局快捷键时出错: {e}')
+            logger.error(f'设置全局快捷键中出错: {e}')
 
-    def show_search_dialog(self):
+    def show_search_dialog(self) -> None:
         self.search_manager.show_search_dialog()
 
-    def show_backup_dialog(self):
+    def show_backup_dialog(self) -> None:
         self.backup_manager.show_backup_dialog()
 
-    def show_import_export_dialog(self):
+    def show_import_export_dialog(self) -> None:
         dialog = ImportExportDialog(self)
         dialog.exec_()
 
-    def show_template_dialog(self):
+    def show_template_dialog(self) -> None:
         from features.template import TemplateDialog
         dialog = TemplateDialog(self)
         dialog.exec_()
 
-    def handle_shortcut_activated(self, action_name):
+    def show_group_view(self) -> None:
+        """显示便签分组视图"""
+        from features.group_view import GroupViewDialog
+        dialog = GroupViewDialog(self)
+        dialog.exec_()
+
+    def handle_shortcut_activated(self, action_name: str) -> None:
         try:
             if action_name == 'add_note':
                 self.add_note()
@@ -149,14 +275,16 @@ class StickyNoteManager:
                 self.show_search_dialog()
             elif action_name == 'show_backup_dialog':
                 self.show_backup_dialog()
+            elif action_name == 'show_group_view':
+                self.show_group_view()
             else:
-                print(f"\u672a\u77e5\u7684\u5feb\u6377\u952e\u52a8\u4f5c: {action_name}")
+                logger.debug(f'未知的快捷键动作: {action_name}')
         except Exception as e:
-            print(f"\u5904\u7406\u5feb\u6377\u952e\u6fc0\u6d3b\u65f6\u51fa\u9519: {e}")
+            logger.error(f'处理快捷键激活时出错: {e}')
 
     # ==================== 系统托盘 ====================
 
-    def setup_tray_icon(self):
+    def setup_tray_icon(self) -> None:
         self.tray_icon = QSystemTrayIcon(self.icon, parent=self.app)
         self.tray_icon.setToolTip("\u684c\u9762\u4fbf\u7b7e\u5e94\u7528")
         self.tray_menu = QMenu()
@@ -182,6 +310,11 @@ class StickyNoteManager:
         impexp_action = QAction("导入导出", self.app)
         impexp_action.triggered.connect(self.show_import_export_dialog)
         self.tray_menu.addAction(impexp_action)
+
+        # 分组视图
+        group_view_action = QAction("分组视图", self.app)
+        group_view_action.triggered.connect(self.show_group_view)
+        self.tray_menu.addAction(group_view_action)
 
         self.tray_menu.addSeparator()
 
@@ -215,6 +348,20 @@ class StickyNoteManager:
         check_update_action.triggered.connect(lambda: self.check_for_updates(manual=True, source='tray'))
         self.tray_menu.addAction(check_update_action)
 
+        # 插件菜单
+        plugins_action = QAction("插件", self.app)
+        plugins_action.triggered.connect(self._show_plugins_menu)
+        self.tray_menu.addAction(plugins_action)
+
+        # 同步菜单
+        sync_action = QAction("云同步", self.app)
+        sync_action.triggered.connect(self._show_sync_dialog)
+        self.tray_menu.addAction(sync_action)
+
+        # 插件注册的托盘菜单项
+        self._plugin_tray_actions = []
+        self._refresh_plugin_tray_menu()
+
         help_action = QAction("帮助", self.app)
         help_action.triggered.connect(self.show_help_dialog)
         self.tray_menu.addAction(help_action)
@@ -227,15 +374,29 @@ class StickyNoteManager:
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
-    def update_tray_menu(self):
+    def update_tray_menu(self) -> None:
         self.notes_menu.clear()
         if not self.notes:
             no_notes_action = QAction("暂无便签", self.app)
             no_notes_action.setEnabled(False)
             self.notes_menu.addAction(no_notes_action)
         else:
-            for note_id, note in sorted(self.notes.items()):
+            # 排序：置顶 > 收藏 > 普通（按标题字母）
+            sorted_notes = sorted(self.notes.items(), key=lambda x: (
+                0 if x[1].note_data.get('pinned', False) else (
+                    1 if x[1].note_data.get('favorite', False) else 2
+                ),
+                x[1].note_data.get('title', f'便签 {x[0]}')
+            ))
+            last_category = None
+            for note_id, note in sorted_notes:
                 note_title = note.note_data.get('title', f'便签 {note_id}')
+                is_pinned = note.note_data.get('pinned', False)
+                is_fav = note.note_data.get('favorite', False)
+                current_cat = 'pinned' if is_pinned else ('favorite' if is_fav else 'normal')
+                if last_category and current_cat != last_category:
+                    self.notes_menu.addSeparator()
+                last_category = current_cat
                 note_menu = QMenu(note_title, self.notes_menu)
                 open_action = QAction("打开", self.app)
                 open_action.triggered.connect(partial(self.open_note, note_id))
@@ -272,14 +433,14 @@ class StickyNoteManager:
                     tag_submenu.addAction(empty_action)
                 self.tags_menu.addMenu(tag_submenu)
     
-    def open_tag_manager(self):
+    def open_tag_manager(self) -> None:
         """打开标签管理器"""
         from features.tag import TagEditDialog
         dialog = TagEditDialog(self)
         dialog.exec_()
         self.update_tray_menu()
 
-    def on_tray_icon_activated(self, reason):
+    def on_tray_icon_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.DoubleClick:
             if self.notes:
                 last_note_id = max(self.notes.keys())
@@ -287,15 +448,16 @@ class StickyNoteManager:
 
     # ==================== 便签管理 ====================
 
-    def add_note(self):
+    def add_note(self) -> None:
         note_id = self.generate_note_id()
+        logger.info(f'创建新便签 #{note_id}')
         default_theme_css = self.get_default_theme_css()
         new_note = StickyNote(note_id, self.notes_dir, manager=self, theme_css=default_theme_css)
         new_note.show()
         self.notes[note_id] = new_note
         self.update_tray_menu()
 
-    def open_note(self, note_id):
+    def open_note(self, note_id: int) -> None:
         if note_id in self.notes:
             note = self.notes[note_id]
             # 如果便签处于贴边自动隐藏状态，先恢复
@@ -305,18 +467,198 @@ class StickyNoteManager:
                 note.show()
             note.raise_()
             note.activateWindow()
+            # 触发插件钩子 on_note_opened
+            if hasattr(self, 'plugin_loader'):
+                try:
+                    self.plugin_loader.dispatch_event('on_note_opened', note_id, None)
+                except Exception as e:
+                    logger.debug(f'插件钩子 on_note_opened 失败: {e}')
 
-    def delete_note(self, note_id):
+    def delete_note(self, note_id: int) -> None:
         if note_id in self.notes:
             note = self.notes[note_id]
             note.delete_note()
 
-    def remove_note(self, note_id):
+    def remove_note(self, note_id: int) -> None:
         if note_id in self.notes:
+            logger.info(f'移除便签 #{note_id}')
+            # 清理链接索引
+            if hasattr(self, 'link_manager'):
+                try:
+                    self.link_manager.remove_note(str(note_id))
+                except Exception as e:
+                    logger.debug(f'清理链接索引失败: {e}')
             del self.notes[note_id]
             self.update_tray_menu()
 
-    def load_notes(self):
+    # ==================== 批量操作 ====================
+
+    def batch_delete_notes(self, note_ids: list) -> int:
+        """批量删除便签，返回成功删除数量"""
+        count = 0
+        for note_id in list(note_ids):
+            if note_id in self.notes:
+                note = self.notes[note_id]
+                note.delete_note()
+                count += 1
+        return count
+
+    def batch_tag_notes(self, note_ids: list, tag_name: str, tag_color: str = None) -> int:
+        """批量为便签添加标签"""
+        count = 0
+        for note_id in note_ids:
+            note = self.notes.get(note_id)
+            if note:
+                tags = note.note_data.get('tags', [])
+                if tag_name not in tags:
+                    tags.append(tag_name)
+                    note.note_data['tags'] = tags
+                    note.save_note()
+                    count += 1
+            else:
+                # 未打开的便签，直接修改文件
+                note_file = os.path.join(self.notes_dir, f'note_{note_id}.json')
+                if os.path.exists(note_file):
+                    try:
+                        with open(note_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        tags = data.get('tags', [])
+                        if tag_name not in tags:
+                            tags.append(tag_name)
+                            data['tags'] = tags
+                            with open(note_file, 'w', encoding='utf-8') as f:
+                                json.dump(data, f, ensure_ascii=False, indent=4)
+                            count += 1
+                    except Exception as e:
+                        logger.warning(f'批量标签失败 note_{note_id}: {e}')
+        if tag_color and hasattr(self, 'tag_manager'):
+            try:
+                self.tag_manager.set_tag_color(tag_name, tag_color)
+            except Exception as e:
+                logger.debug(f'设置标签颜色失败: {e}')
+        self.update_tray_menu()
+        return count
+
+    def batch_export_notes(self, note_ids: list, export_path: str) -> int:
+        """批量导出便签为独立JSON文件"""
+        import shutil
+        count = 0
+        os.makedirs(export_path, exist_ok=True)
+        for note_id in note_ids:
+            note_file = os.path.join(self.notes_dir, f'note_{note_id}.json')
+            if os.path.exists(note_file):
+                try:
+                    dest = os.path.join(export_path, f'note_{note_id}.json')
+                    shutil.copy2(note_file, dest)
+                    count += 1
+                except Exception as e:
+                    logger.warning(f'导出便签 {note_id} 失败: {e}')
+        return count
+
+    def toggle_note_pin(self, note_id: int) -> bool:
+        """切换便签置顶状态"""
+        note = self.notes.get(note_id)
+        if note:
+            note.toggle_pin()
+            return note.is_pinned
+        return False
+
+    def toggle_note_favorite(self, note_id: int) -> bool:
+        """切换便签收藏状态"""
+        note = self.notes.get(note_id)
+        if note:
+            note.toggle_favorite()
+            return note.is_favorite
+        return False
+
+    def open_note_by_title(self, title: str) -> None:
+        """通过标题查找并打开便签"""
+        for note_id, note in self.notes.items():
+            note_title = note.note_data.get('title', f'便签 {note_id}')
+            if note_title == title:
+                self.open_note(note_id)
+                return
+        logger.warning(f'未找到标题为 "{title}" 的便签')
+
+    def _show_plugins_menu(self) -> None:
+        """显示插件菜单对话框"""
+        from PyQt5.QtWidgets import (
+            QDialog as _QDialog, QVBoxLayout as _VL, QListWidget as _QLW,
+            QPushButton as _QBtn, QHBoxLayout as _HL, QLabel as _QLbl
+        )
+        dialog = _QDialog(None)
+        dialog.setWindowTitle('插件管理')
+        dialog.setFixedSize(400, 300)
+        dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        layout = _VL()
+        layout.addWidget(_QLbl('已加载的插件:'))
+        list_widget = _QLW()
+        if hasattr(self, 'plugin_registry'):
+            for name, plugin in self.plugin_registry.list_plugins():
+                list_widget.addItem(f'{name} — {plugin.description}')
+        if list_widget.count() == 0:
+            list_widget.addItem('(无已加载的插件)')
+        layout.addWidget(list_widget)
+        btn_layout = _HL()
+        btn_layout.addStretch()
+        close_btn = _QBtn('关闭')
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        dialog.setLayout(layout)
+        dialog.exec_()
+
+    def _show_sync_dialog(self) -> None:
+        """显示云同步对话框"""
+        try:
+            from features.sync_dialog import SyncDialog
+            dialog = SyncDialog(self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(None, '云同步', f'打开同步对话框失败: {e}')
+
+    def _refresh_plugin_tray_menu(self) -> None:
+        """刷新插件注册的托盘菜单项"""
+        # 清除旧的插件动作
+        for action in self._plugin_tray_actions:
+            self.tray_menu.removeAction(action)
+        self._plugin_tray_actions.clear()
+
+        if not hasattr(self, 'plugin_registry'):
+            return
+
+        tray_items = self.plugin_registry.get_tray_menu_items()
+        if not tray_items:
+            return
+
+        help_action = self._find_help_action()
+
+        # 添加分隔线
+        sep = self.tray_menu.insertSeparator(help_action)
+        self._plugin_tray_actions.append(sep)
+
+        for label, callback in tray_items:
+            action = QAction(label, self.app)
+            action.triggered.connect(callback)
+            self.tray_menu.insertAction(help_action, action)
+            self._plugin_tray_actions.append(action)
+
+    def _find_help_action(self):
+        """查找帮助菜单项的 QAction"""
+        for action in self.tray_menu.actions():
+            if action.text() == '帮助':
+                return action
+        return None
+
+    def _find_help_action_index(self):
+        """查找帮助菜单项的索引"""
+        actions = self.tray_menu.actions()
+        for i, action in enumerate(actions):
+            if action.text() == '帮助':
+                return i
+        return len(actions)
+
+    def load_notes(self) -> None:
         """
         异步加载所有便签
         
@@ -334,11 +676,12 @@ class StickyNoteManager:
                     file_path = os.path.join(self.notes_dir, filename)
                     note_files.append((note_id, file_path))
                 except Exception as e:
-                    print(f"\u89e3\u6790\u4fbf\u7b7e\u6587\u4ef6\u540d\u65f6\u51fa\u9519: {e}")
+                    logger.warning(f'解析便签文件名时出错: {e}')
 
         self._total_note_files = len(note_files)
 
         if note_files:
+            logger.info(f'开始加载 {len(note_files)} 个便签...')
             for note_id, file_path in note_files:
                 loader = NoteLoadWorker(note_id, file_path)
                 loader.loaded.connect(self._on_note_data_loaded)
@@ -350,7 +693,7 @@ class StickyNoteManager:
             self.add_note()
             self.update_tray_menu()
 
-    def _on_note_data_loaded(self, note_id: int, data: dict):
+    def _on_note_data_loaded(self, note_id: int, data: dict) -> None:
         """异步加载完成回调 — 在主线程创建便签控件"""
         try:
             default_theme_css = self.get_default_theme_css()
@@ -363,26 +706,27 @@ class StickyNoteManager:
             new_note.show()
             self.notes[note_id] = new_note
         except Exception as e:
-            print(f"\u521b\u5efa\u4fbf\u7b7e {note_id} \u65f6\u51fa\u9519: {e}")
+            logger.error(f'创建便签 {note_id} 时出错: {e}')
         finally:
             self._loaded_note_count += 1
             self._check_all_loaded()
 
-    def _on_note_load_failed(self, note_id: int, error: str):
+    def _on_note_load_failed(self, note_id: int, error: str) -> None:
         """异步加载失败回调"""
-        print(f"\u52a0\u8f7d\u4fbf\u7b7e {note_id} \u5931\u8d25: {error}")
+        logger.warning(f'加载便签 {note_id} 失败: {error}')
         self._loaded_note_count += 1
         self._check_all_loaded()
 
-    def _check_all_loaded(self):
+    def _check_all_loaded(self) -> None:
         """检查是否所有便签都已加载完成"""
         if self._loaded_note_count >= self._total_note_files:
+            logger.info(f'便签加载完成: {len(self.notes)} 个便签已就绪')
             self.update_tray_menu()
             # 如果异步加载后仍无便签，创建默认便签
             if not self.notes:
                 self.add_note()
 
-    def generate_note_id(self):
+    def generate_note_id(self) -> int:
         existing_ids = set(self.notes.keys())
         note_id = 1
         while note_id in existing_ids:
@@ -391,14 +735,14 @@ class StickyNoteManager:
 
     # ==================== 设置管理 ====================
 
-    def open_settings(self):
+    def open_settings(self) -> None:
         """打开设置对话框（安全模式：每次新建，不使用 WA_DeleteOnClose）"""
         # 如果已有打开的对话框，先关闭它
         if self.settings_dialog is not None:
             try:
                 self.settings_dialog.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f'关闭设置对话框失败: {e}')
             self.settings_dialog = None
 
         self.settings_dialog = SettingsDialog(self)
@@ -406,16 +750,16 @@ class StickyNoteManager:
         self.settings_dialog.finished.connect(self.on_settings_closed)
         self.settings_dialog.show()
 
-    def on_settings_closed(self, result=None):
+    def on_settings_closed(self, result=None) -> None:
         """设置对话框关闭后的清理"""
         if self.settings_dialog is not None:
             try:
                 self.settings_dialog.deleteLater()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f'deleteLater 失败: {e}')
             self.settings_dialog = None
 
-    def show_help_dialog(self):
+    def show_help_dialog(self) -> None:
         """显示完整的帮助使用说明对话框"""
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QLabel
 
@@ -503,25 +847,18 @@ class StickyNoteManager:
         dialog.setLayout(layout)
         dialog.exec_()
 
-    def load_settings(self):
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                QMessageBox.warning(None, '\u52a0\u8f7d\u8bbe\u7f6e\u9519\u8bef', f'\u65e0\u6cd5\u52a0\u8f7d\u8bbe\u7f6e\u6587\u4ef6: {e}')
-                return {'default_theme': "soft_yellow.css"}
-        else:
-            return {'default_theme': "soft_yellow.css"}
+    def load_settings(self) -> Dict[str, Any]:
+        """加载设置（委托给 ConfigManager）"""
+        return self.config.get_all()
+    
+    def save_settings(self) -> None:
+        """保存设置（委托给 ConfigManager 原子写入）"""
+        # 将 self.settings 的变化同步回 config 并保存
+        for key, value in self.settings.items():
+            self.config.set(key, value, auto_save=False)
+        self.config.save()
 
-    def save_settings(self):
-        try:
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(self.settings, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            QMessageBox.warning(None, '\u4fdd\u5b58\u8bbe\u7f6e\u9519\u8bef', f'\u65e0\u6cd5\u4fdd\u5b58\u8bbe\u7f6e\u6587\u4ef6: {e}')
-
-    def get_available_themes(self):
+    def get_available_themes(self) -> Dict[str, str]:
         themes = {}
         styles_dir = get_styles_dir()
         if not os.path.exists(styles_dir):
@@ -534,7 +871,7 @@ class StickyNoteManager:
                     themes[theme_name] = filename
         return themes
 
-    def extract_theme_name_from_css(self, filepath):
+    def extract_theme_name_from_css(self, filepath: str) -> Optional[str]:
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -549,44 +886,63 @@ class StickyNoteManager:
                         break
             return None
         except Exception as e:
-            print(f"\u65e0\u6cd5\u4ece {filepath} \u4e2d\u63d0\u53d6\u4e3b\u9898\u540d\u79f0: {e}")
+            logger.warning(f'无法从 {filepath} 中提取主题名称: {e}')
             return None
 
-    def get_theme_name_by_css(self, css_filename):
+    def get_theme_name_by_css(self, css_filename: str) -> Optional[str]:
         for name, filename in self.get_available_themes().items():
             if filename == css_filename:
                 return name
         return None
 
-    def get_default_theme_css(self):
+    def get_default_theme_css(self) -> str:
         return self.settings.get('default_theme', "soft_yellow.css")
 
-    def set_default_theme(self, theme_css):
+    def set_default_theme(self, theme_css: str) -> None:
         self.settings['default_theme'] = theme_css
-        self.save_settings()
+        self.config.set('default_theme', theme_css)
 
-    def apply_theme_to_all_notes(self):
+    def apply_theme_to_all_notes(self) -> None:
         for note in self.notes.values():
             note.set_theme(self.get_default_theme_css())
 
-    def get_default_font(self):
+    def _init_theme_watcher(self) -> None:
+        """初始化主题文件热加载监视器"""
+        try:
+            from features.theme_helper import setup_theme_watcher, invalidate_cache
+            styles_dir = get_styles_dir()
+            setup_theme_watcher(styles_dir, self._on_theme_files_changed)
+        except Exception as e:
+            logger.debug(f'初始化主题监视器失败: {e}')
+
+    def _on_theme_files_changed(self) -> None:
+        """主题文件变更回调 — 重新应用主题到所有便签"""
+        try:
+            from features.theme_helper import invalidate_cache
+            invalidate_cache()
+            self.apply_theme_to_all_notes()
+            logger.debug('主题文件已变更，已重新应用到所有便签')
+        except Exception as e:
+            logger.debug(f'热加载主题失败: {e}')
+
+    def get_default_font(self) -> dict:
         return self.settings.get('font', {
             'family': '\u5fae\u8f6f\u96c5\u9ed1', 'size': 12,
             'bold': False, 'italic': False
         })
 
-    def set_default_font(self, font_settings):
+    def set_default_font(self, font_settings: dict) -> None:
         self.settings['font'] = font_settings
-        self.save_settings()
+        self.config.set('font', font_settings)
 
-    def apply_font_to_all_notes(self):
+    def apply_font_to_all_notes(self) -> None:
         font_settings = self.get_default_font()
         for note in self.notes.values():
             note.set_font(font_settings)
 
     # ==================== 开机自启 ====================
 
-    def set_autostart(self, enable=True):
+    def set_autostart(self, enable: bool = True) -> bool:
         exe_path = os.path.realpath(sys.argv[0])
         run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
@@ -605,7 +961,7 @@ class StickyNoteManager:
             QMessageBox.warning(None, '\u8bbe\u7f6e\u5f00\u673a\u81ea\u542f\u5931\u8d25', f'\u65e0\u6cd5\u8bbe\u7f6e\u5f00\u673a\u81ea\u542f: {e}')
             return False
 
-    def check_autostart(self):
+    def check_autostart(self) -> bool:
         run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
             registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
@@ -619,7 +975,7 @@ class StickyNoteManager:
             QMessageBox.warning(None, '\u68c0\u67e5\u5f00\u673a\u81ea\u542f\u5931\u8d25', f'\u65e0\u6cd5\u68c0\u67e5\u5f00\u673a\u81ea\u542f\u72b6\u6001: {e}')
             return False
 
-    def toggle_autostart(self, checked):
+    def toggle_autostart(self, checked: bool) -> None:
         if checked:
             success = self.set_autostart(True)
             if success:
@@ -635,16 +991,16 @@ class StickyNoteManager:
 
     # ==================== 保存与更新 ====================
 
-    def save_window_positions(self):
+    def save_window_positions(self) -> None:
         """保存所有便签的窗口位置到历史记录"""
         try:
             self.position_manager.save_position_history()
         except Exception as e:
-            print(f"保存窗口位置时出错: {e}")
+            logger.error(f'保存窗口位置时出错: {e}')
 
     # ==================== 更新流程 ====================
 
-    def check_for_updates(self, manual=False, source='auto'):
+    def check_for_updates(self, manual: bool = False, source: str = 'auto'):
         """
         启动版本检查。
         
@@ -664,23 +1020,23 @@ class StickyNoteManager:
         self._update_checker.check_failed.connect(self._on_update_check_failed)
         self._update_checker.start()
     
-    def cancel_update_check(self):
+    def cancel_update_check(self) -> None:
         """取消正在进行的版本检查"""
         if self._update_checker and self._update_checker.isRunning():
             self._update_checker.abort()
 
-    def _notify_settings_update_available(self, update_info):
+    def _notify_settings_update_available(self, update_info: dict) -> None:
         """将更新信息转发到设置页面的行内展示区域（不弹模态对话框）"""
         if self.settings_dialog and hasattr(self.settings_dialog, 'show_inline_update_info'):
             self.settings_dialog.show_inline_update_info(update_info, __version__)
         self._restore_manual_check_btn()
     
-    def _on_check_status_update(self, status_text):
+    def _on_check_status_update(self, status_text: str) -> None:
         """更新检查进度状态 — 转发给设置对话框"""
         if self.settings_dialog and hasattr(self.settings_dialog, 'on_check_status_update'):
             self.settings_dialog.on_check_status_update(status_text)
 
-    def _on_update_available(self, update_info):
+    def _on_update_available(self, update_info: dict) -> None:
         # 检查是否已跳过此版本
         skip_version = self.settings.get('skip_version', '')
         if update_info['tag'] == skip_version:
@@ -709,15 +1065,15 @@ class StickyNoteManager:
             self._start_download_update(update_info)
         elif dialog.action == 'skip':
             self.settings['skip_version'] = update_info['tag']
-            self.save_settings()
+            self.config.set('skip_version', update_info['tag'])
             self._restore_manual_check_btn()
         else:
             # later — 持久化，自动检查不再提醒此版本
             self.settings['last_dismissed_version'] = update_info['tag']
-            self.save_settings()
+            self.config.set('last_dismissed_version', update_info['tag'])
             self._restore_manual_check_btn()
 
-    def _on_no_update(self, manual=False):
+    def _on_no_update(self, manual: bool = False) -> None:
         source = getattr(self, '_update_source', 'auto')
         if manual:
             if source == 'settings':
@@ -736,7 +1092,7 @@ class StickyNoteManager:
                 )
         self._restore_manual_check_btn()
 
-    def _on_update_check_failed(self, error_msg):
+    def _on_update_check_failed(self, error_msg: str) -> None:
         if hasattr(self, '_update_manual') and self._update_manual:
             source = getattr(self, '_update_source', 'tray')
             if self.settings_dialog and hasattr(self.settings_dialog, 'update_status_label'):
@@ -747,10 +1103,10 @@ class StickyNoteManager:
             if '已取消' not in error_msg and source != 'settings':
                 QMessageBox.warning(None, '检查更新失败', f'无法检查更新：\n{error_msg}')
         else:
-            print(f'[更新] 自动检查失败: {error_msg}')
+            logger.info(f'[更新] 自动检查失败: {error_msg}')
         self._restore_manual_check_btn()
 
-    def _restore_manual_check_btn(self):
+    def _restore_manual_check_btn(self) -> None:
         """恢复设置对话框中的'检查更新'按钮状态"""
         if self.settings_dialog and hasattr(self.settings_dialog, 'check_update_btn'):
             self.settings_dialog.check_update_btn.setEnabled(True)
@@ -763,7 +1119,7 @@ class StickyNoteManager:
             if hasattr(self, '_last_check_status'):
                 self.settings_dialog.update_status_label.setText(self._last_check_status)
 
-    def _start_download_update(self, update_info):
+    def _start_download_update(self, update_info: dict) -> None:
         """开始下载更新 — 统一下载 portable ZIP"""
         assets = update_info.get('assets', [])
         if not assets:
@@ -803,7 +1159,7 @@ class StickyNoteManager:
         self._update_downloader.download_failed.connect(self._on_download_failed)
         self._update_downloader.start()
 
-    def _match_asset(self, assets, install_type):
+    def _match_asset(self, assets: List[dict], install_type: str) -> Tuple[Optional[dict], Optional[dict]]:
         """
         统一下载策略：始终返回 portable ZIP 资产。
         对于 MSI 用户，额外标记 MSI 资产（用于更新注册表）。
@@ -829,11 +1185,11 @@ class StickyNoteManager:
         else:
             return (zip_asset, None)
 
-    def _on_download_progress(self, percent):
+    def _on_download_progress(self, percent: int) -> None:
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.set_progress(percent)
 
-    def _on_download_finished(self, file_path):
+    def _on_download_finished(self, file_path: str) -> None:
         """ZIP 下载完成"""
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.accept()
@@ -860,7 +1216,7 @@ class StickyNoteManager:
             execute_update(self, file_path, install_type, msi_path)
         self._restore_manual_check_btn()
 
-    def _download_msi_sync(self, url, name):
+    def _download_msi_sync(self, url: str, name: str) -> Optional[str]:
         """
         同步下载 MSI 文件（体积较小，主线程短时阻塞可接受）。
         
@@ -878,10 +1234,10 @@ class StickyNoteManager:
                 f.write(data)
             return temp_path
         except Exception as e:
-            print(f'[更新] MSI 下载失败（将仅更新文件，跳过注册表）: {e}')
+            logger.warning(f'[更新] MSI 下载失败（将仅更新文件，跳过注册表）: {e}')
             return None
 
-    def _on_download_failed(self, error_msg):
+    def _on_download_failed(self, error_msg: str) -> None:
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.accept()
             self._progress_dialog = None
@@ -890,11 +1246,24 @@ class StickyNoteManager:
 
     # ==================== 应用生命周期 ====================
 
-    def exit_application(self):
+    def exit_application(self) -> None:
+        logger.info(f'应用退出，正在保存 {len(self.notes)} 个便签...')
         try:
             self.shortcut_manager.cleanup()
         except Exception as e:
-            print(f"\u6e05\u7406\u5feb\u6377\u952e\u65f6\u51fa\u9519: {e}")
+            logger.error(f'清理快捷键时出错: {e}')
+        # 卸载插件
+        if hasattr(self, 'plugin_loader'):
+            try:
+                self.plugin_loader.unload_all()
+            except Exception as e:
+                logger.error(f'卸载插件时出错: {e}')
+        # 保存链接索引
+        if hasattr(self, 'link_manager'):
+            try:
+                self.link_manager.save_index()
+            except Exception as e:
+                logger.error(f'保存链接索引时出错: {e}')
         # 同步保存所有便签后关闭
         for note in list(self.notes.values()):
             note.is_deleted = True
@@ -902,10 +1271,10 @@ class StickyNoteManager:
             try:
                 note.save_note_sync()
             except Exception as e:
-                print(f"\u5173\u95ed\u65f6\u4fdd\u5b58\u4fbf\u7b7e {note.note_id} \u5931\u8d25: {e}")
+                logger.error(f'关闭时保存便签 {note.note_id} 失败: {e}')
             note.close()
         self.tray_icon.hide()
         QCoreApplication.quit()
 
-    def run(self):
+    def run(self) -> int:
         sys.exit(self.app.exec_())

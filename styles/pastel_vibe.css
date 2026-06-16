@@ -1,0 +1,73 @@
+/* Theme Name: 马卡龙柔粉 */
+
+StickyNote {
+    background-color: #fce4ec;
+    color: #37474f;
+}
+
+QLineEdit {
+    background-color: #fff0f3;
+    border: 2px solid #f48fb1;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #37474f;
+}
+
+QTextEdit {
+    background-color: #fff0f3;
+    border: 2px solid #f48fb1;
+    border-radius: 5px;
+    padding: 5px;
+    font-family: "微软雅黑";
+    color: #37474f;
+}
+
+QPushButton {
+    background-color: #f48fb1;
+    color: #37474f;
+    border: none;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #f8bbd0;
+}
+
+QSlider::handle:horizontal {
+    background-color: #f48fb1;
+    border: 1px solid #ec407a;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    font-family: "微软雅黑";
+    color: #37474f;
+}
+
+QDialog {
+    background-color: #fce4ec;
+    color: #37474f;
+}
+
+QComboBox {
+    background-color: #fff0f3;
+    border: 1px solid #f48fb1;
+    border-radius: 5px;
+    padding: 5px;
+    color: #37474f;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #f48fb1;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png);
+}

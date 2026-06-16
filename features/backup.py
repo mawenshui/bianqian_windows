@@ -9,6 +9,8 @@ import os
 import json
 import shutil
 import zipfile
+import hashlib
+import logging
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
@@ -19,6 +21,8 @@ from PyQt5.QtCore import QTimer, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 
 from core import get_styles_dir, get_user_data_dir
+
+logger = logging.getLogger(__name__)
 
 
 class BackupWorker(QThread):
@@ -120,6 +124,13 @@ class BackupDialog(QDialog):
         self.restore_worker = None
         self.initUI()
         self.refresh_backup_list()
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            manager = getattr(backup_manager, 'manager', None)
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception:
+            pass
     
     def initUI(self):
         """
@@ -483,6 +494,9 @@ class BackupManager:
         self.auto_backup_timer = QTimer()
         self.auto_backup_timer.timeout.connect(self.auto_backup)
         
+        # 上次备份时的数据状态哈希（用于跳过无变化的备份）
+        self._last_backup_hash = ''
+        
         # 加载设置
         self.load_backup_settings()
         
@@ -650,11 +664,52 @@ class BackupManager:
             print(f'恢复备份时出错: {e}')
             return False
     
+    def _get_notes_state_hash(self):
+        """
+        计算当前所有便签数据的状态哈希
+        
+        通过读取 notes 目录下所有 .json 文件的内容和文件名，
+        生成一个整体哈希值，用于检测数据是否有变化。
+        
+        Returns:
+            str: SHA256 哈希字符串
+        """
+        hasher = hashlib.sha256()
+        notes_dir = getattr(self.manager, 'notes_dir', '')
+        if not notes_dir or not os.path.exists(notes_dir):
+            return ''
+        
+        try:
+            # 收集所有便签 JSON 文件，按文件名排序确保一致性
+            json_files = sorted(
+                f for f in os.listdir(notes_dir)
+                if f.endswith('.json')
+            )
+            for fname in json_files:
+                fpath = os.path.join(notes_dir, fname)
+                hasher.update(fname.encode('utf-8'))
+                # 使用文件修改时间 + 文件大小作为快速指纹
+                stat = os.stat(fpath)
+                hasher.update(f'{stat.st_mtime:.6f}:{stat.st_size}'.encode('utf-8'))
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.debug(f'计算便签状态哈希失败: {e}')
+            return ''
+    
     def auto_backup(self):
         """
         自动备份
+        
+        每次定时触发时先检测数据是否有变化，
+        若与上次备份状态一致则跳过，避免产生大量重复备份文件。
         """
         if not self.auto_backup_enabled:
+            return
+        
+        # 检测数据是否有变化
+        current_hash = self._get_notes_state_hash()
+        if current_hash and current_hash == self._last_backup_hash:
+            logger.info('本次检查无修改，跳过本次备份')
             return
         
         # 清理旧备份
@@ -663,7 +718,8 @@ class BackupManager:
         # 创建新备份
         backup_path = self.create_backup()
         if backup_path:
-            print(f"自动备份已创建: {backup_path}")
+            self._last_backup_hash = current_hash
+            logger.info(f'自动备份已创建: {backup_path}')
     
     def cleanup_old_backups(self):
         """

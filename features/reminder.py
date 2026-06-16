@@ -103,6 +103,13 @@ class ReminderDialog(QDialog):
         self.reminder = ReminderData(note.note_data.get('reminder'))
         self.initUI()
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            manager = getattr(note, 'manager', None)
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception:
+            pass
 
     def initUI(self):
         self.setWindowTitle('\u63d0\u9192\u8bbe\u7f6e')

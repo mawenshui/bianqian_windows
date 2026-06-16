@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "StickyNote"
+version = "1.7.0"
+description = "桌面便签应用 — 一款轻量级的 Windows 桌面便签工具"
+authors = [{name = "MaWenshui"}]
+readme = "readme.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+]
+
+dependencies = [
+    "PyQt5>=5.15",
+    "pywin32>=305",
+]
+
+[project.optional-dependencies]
+crypto = [
+    "cryptography>=41.0",
+    "argon2-cffi>=23.1",
+]
+markdown = [
+    "markdown>=3.5",
+    "Pygments>=2.17",
+]
+sync = [
+    "requests>=2.31",
+    "webdavclient3>=3.14",
+]
+all = [
+    "StickyNote[crypto,markdown,sync]",
+]
+
+[project.scripts]
+stickynote = "main:main"
+
+[tool.setuptools]
+packages = ["core", "features"]
+
+[tool.setuptools.package-data]
+styles = ["*.css"]

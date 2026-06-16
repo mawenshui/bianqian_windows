@@ -27,7 +27,6 @@ from features.updater import (
     detect_install_type,
     UpdateChecker,
     UpdateDownloader,
-    prepare_update_helper,
     GITHUB_DOWNLOAD_TIMEOUT,
     MIRROR_DOWNLOAD_TIMEOUT,
     MIRROR_PREFIX,
@@ -289,7 +288,6 @@ class TestUpdateDownloader(unittest.TestCase):
     def setUp(self):
         self.test_url = 'https://github.com/test/releases/download/v1.0/test.exe'
         self.asset_name = 'test.exe'
-        self.install_type = 'portable'
 
     @patch('features.updater.urllib.request.urlopen')
     def test_successful_download(self, mock_urlopen):
@@ -313,7 +311,7 @@ class TestUpdateDownloader(unittest.TestCase):
         mock_resp.read.side_effect = read_side_effect
         mock_urlopen.return_value = mock_resp
 
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         results = []
         progress_values = []
 
@@ -355,7 +353,7 @@ class TestUpdateDownloader(unittest.TestCase):
         mock_resp.read.side_effect = read_side_effect
         mock_urlopen.return_value = mock_resp
 
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         progress_values = []
         done = []
 
@@ -390,7 +388,7 @@ class TestUpdateDownloader(unittest.TestCase):
 
         mock_urlopen.side_effect = urlopen_side_effect
 
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         results = []
 
         downloader.download_finished.connect(lambda p: results.append(('done', p)))
@@ -411,7 +409,7 @@ class TestUpdateDownloader(unittest.TestCase):
         """两个链接都失败"""
         mock_urlopen.side_effect = urllib.error.URLError('所有源均不可用')
 
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         results = []
 
         downloader.download_failed.connect(lambda msg: results.append(msg))
@@ -430,7 +428,7 @@ class TestUpdateDownloader(unittest.TestCase):
         mock_resp.headers = {'Content-Length': str(len(test_data))}
 
         # 下载中断
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         mock_resp.read.side_effect = [test_data[:DOWNLOAD_CHUNK_SIZE]] + [b''] * 10
 
         results = []
@@ -454,7 +452,7 @@ class TestUpdateDownloader(unittest.TestCase):
         mock_resp.read.return_value = b''
         mock_urlopen.return_value = mock_resp
 
-        downloader = UpdateDownloader(self.test_url, self.asset_name, self.install_type)
+        downloader = UpdateDownloader(self.test_url, self.asset_name)
         results = []
 
         downloader.download_finished.connect(lambda p: results.append(('done', p)))
@@ -467,25 +465,6 @@ class TestUpdateDownloader(unittest.TestCase):
         # 清理
         import shutil
         shutil.rmtree(os.path.dirname(results[0][1]), ignore_errors=True)
-
-
-class TestPrepareUpdateHelper(unittest.TestCase):
-    """辅助脚本生成测试"""
-
-    def test_msi_script_contains_msiexec(self):
-        script = prepare_update_helper('msi')
-        self.assertIn('msiexec.exe', script)
-        self.assertIn('/quiet', script)
-        self.assertIn('ExePath', script)
-
-    def test_portable_script_contains_copy(self):
-        script = prepare_update_helper('portable')
-        self.assertIn('Copy-Item', script)
-        self.assertIn('ExePath', script)
-
-    def test_script_is_string(self):
-        self.assertIsInstance(prepare_update_helper('msi'), str)
-        self.assertIsInstance(prepare_update_helper('portable'), str)
 
 
 class TestEdgeCases(unittest.TestCase):

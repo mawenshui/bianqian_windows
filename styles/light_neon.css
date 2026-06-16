@@ -1,0 +1,73 @@
+/* Theme Name: 霓虹清新 */
+
+StickyNote {
+    background-color: #f8f9fa;
+    color: #212121;
+}
+
+QLineEdit {
+    background-color: #FFFFFF;
+    border: 2px solid #00e676;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #212121;
+}
+
+QTextEdit {
+    background-color: #FFFFFF;
+    border: 2px solid #00e676;
+    border-radius: 5px;
+    padding: 5px;
+    font-family: "微软雅黑";
+    color: #212121;
+}
+
+QPushButton {
+    background-color: #00e676;
+    color: #1b5e20;
+    border: none;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #69f0ae;
+}
+
+QSlider::handle:horizontal {
+    background-color: #00e676;
+    border: 1px solid #1b5e20;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    font-family: "微软雅黑";
+    color: #212121;
+}
+
+QDialog {
+    background-color: #f8f9fa;
+    color: #212121;
+}
+
+QComboBox {
+    background-color: #FFFFFF;
+    border: 1px solid #00e676;
+    border-radius: 5px;
+    padding: 5px;
+    color: #212121;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #00e676;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png);
+}

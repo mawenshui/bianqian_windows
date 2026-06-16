@@ -1,0 +1,73 @@
+/* Theme Name: 高对比度 */
+
+StickyNote {
+    background-color: #000000;
+    color: #FFFFFF;
+}
+
+QLineEdit {
+    background-color: #1a1a1a;
+    border: 2px solid #ffff00;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #FFFFFF;
+}
+
+QTextEdit {
+    background-color: #1a1a1a;
+    border: 2px solid #ffff00;
+    border-radius: 5px;
+    padding: 5px;
+    font-family: "微软雅黑";
+    color: #FFFFFF;
+}
+
+QPushButton {
+    background-color: #333333;
+    color: #FFFFFF;
+    border: 2px solid #ffff00;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #555555;
+}
+
+QSlider::handle:horizontal {
+    background-color: #ffff00;
+    border: 1px solid #FFFFFF;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    font-family: "微软雅黑";
+    color: #FFFFFF;
+}
+
+QDialog {
+    background-color: #000000;
+    color: #FFFFFF;
+}
+
+QComboBox {
+    background-color: #1a1a1a;
+    border: 2px solid #ffff00;
+    border-radius: 5px;
+    padding: 5px;
+    color: #FFFFFF;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #ffff00;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png);
+}

@@ -126,7 +126,7 @@ class TagManager:
 
 
 class TagChipWidget(QFrame):
-    """便签上的标签芯片组件"""
+    """便签上的标签芯片组件（紧凑型，自带删除按钮）"""
 
     removed = pyqtSignal(str)  # 标签被移除时发射
 
@@ -134,37 +134,41 @@ class TagChipWidget(QFrame):
         super().__init__(parent)
         self.tag_name = tag_name
         self.color = color
-        self.setFrameStyle(QFrame.StyledPanel)
+        self.setFrameStyle(QFrame.NoFrame)
         self.setStyleSheet(f'''
-            QFrame {{
+            TagChipWidget {{
                 background-color: {color};
-                border-radius: 8px;
-                padding: 2px 6px;
+                border-radius: 10px;
+                padding: 1px 4px;
             }}
-            QFrame:hover {{
-                opacity: 0.8;
+            TagChipWidget:hover {{
+                background-color: {color};
             }}
         ''')
-        self.setFixedHeight(22)
-        self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.setFixedHeight(20)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(6, 1, 4, 1)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 0, 4, 0)
+        layout.setSpacing(3)
 
         label = QLabel(tag_name)
-        label.setStyleSheet('color: white; font-size: 10pt; font-weight: bold; background: transparent;')
+        label.setStyleSheet('color: white; font-size: 8pt; font-weight: bold; background: transparent; border: none;')
         layout.addWidget(label)
 
         close_btn = QPushButton('×')
         close_btn.setFixedSize(14, 14)
+        close_btn.setToolTip(f'移除标签: {tag_name}')
+        close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet('''
             QPushButton {
-                background: rgba(255,255,255,0.3); color: white;
-                border-radius: 7px; font-size: 10pt; font-weight: bold;
-                border: none;
+                background: rgba(255,255,255,0.25); color: white;
+                border-radius: 7px; font-size: 9pt; font-weight: bold;
+                border: none; padding: 0;
             }
-            QPushButton:hover { background: rgba(255,255,255,0.6); }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.5);
+            }
         ''')
         close_btn.clicked.connect(lambda: self.removed.emit(self.tag_name))
         layout.addWidget(close_btn)
@@ -181,6 +185,12 @@ class TagEditDialog(QDialog):
         self.tag_manager = manager.tag_manager if hasattr(manager, 'tag_manager') else None
         self.initUI()
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception:
+            pass
 
     def initUI(self):
         self.setWindowTitle('\u6807\u7b7e\u7ba1\u7406')

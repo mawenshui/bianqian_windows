@@ -1,0 +1,73 @@
+/* Theme Name: 深海蓝 */
+
+StickyNote {
+    background-color: #0d1b2a;
+    color: #e0e1dd;
+}
+
+QLineEdit {
+    background-color: #1b2838;
+    border: 2px solid #48cae4;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    font-weight: bold;
+    text-align: center;
+    padding: 5px;
+    color: #e0e1dd;
+}
+
+QTextEdit {
+    background-color: #1b2838;
+    border: 2px solid #48cae4;
+    border-radius: 5px;
+    padding: 5px;
+    font-family: "微软雅黑";
+    color: #e0e1dd;
+}
+
+QPushButton {
+    background-color: #1b3a4b;
+    color: #e0e1dd;
+    border: none;
+    border-radius: 5px;
+    font-family: "微软雅黑";
+    padding: 5px;
+}
+
+QPushButton:hover {
+    background-color: #274c5b;
+}
+
+QSlider::handle:horizontal {
+    background-color: #48cae4;
+    border: 1px solid #0d1b2a;
+    width: 18px;
+    margin: -2px 0;
+    border-radius: 3px;
+}
+
+QCheckBox {
+    font-family: "微软雅黑";
+    color: #e0e1dd;
+}
+
+QDialog {
+    background-color: #0d1b2a;
+    color: #e0e1dd;
+}
+
+QComboBox {
+    background-color: #1b2838;
+    border: 1px solid #48cae4;
+    border-radius: 5px;
+    padding: 5px;
+    color: #e0e1dd;
+}
+
+QComboBox::drop-down {
+    border-left: 1px solid #48cae4;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/down_arrow.png);
+}

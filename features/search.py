@@ -7,9 +7,13 @@
 
 import os
 import json
+import logging
+
+logger = logging.getLogger(__name__)
+
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, 
-    QListWidgetItem, QPushButton, QLabel, QMessageBox
+    QListWidgetItem, QPushButton, QLabel, QMessageBox, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -37,6 +41,12 @@ class SearchDialog(QDialog):
         self.search_results = []
         self.initUI()
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        # 应用主题适配
+        try:
+            from features.theme_helper import apply_dialog_theme, get_current_theme_css
+            apply_dialog_theme(self, get_current_theme_css(manager))
+        except Exception as e:
+            logger.debug(f'应用搜索对话框主题失败: {e}')
         
     def initUI(self):
         """
@@ -65,6 +75,16 @@ class SearchDialog(QDialog):
         search_layout.addWidget(search_label)
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
+        
+        # 标签过滤
+        filter_layout = QHBoxLayout()
+        filter_label = QLabel('标签筛选:')
+        self.tag_filter = QComboBox()
+        self.tag_filter.addItem('全部标签')
+        self.tag_filter.currentIndexChanged.connect(self.perform_search)
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(self.tag_filter, 1)
+        layout.addLayout(filter_layout)
         
         # 结果统计标签
         self.result_label = QLabel('请输入关键词开始搜索')
@@ -100,7 +120,26 @@ class SearchDialog(QDialog):
         # 设置焦点到搜索框
         self.search_input.setFocus()
     
-    def perform_search(self, query):
+    def refresh_tag_filter(self):
+        """刷新标签过滤下拉框"""
+        self.tag_filter.blockSignals(True)
+        current = self.tag_filter.currentText()
+        self.tag_filter.clear()
+        self.tag_filter.addItem('全部标签')
+        if self.manager and hasattr(self.manager, 'tag_manager'):
+            try:
+                all_tags = self.manager.tag_manager.get_all_tags()
+                for tag_name in sorted(all_tags.keys()):
+                    self.tag_filter.addItem(tag_name)
+            except Exception as e:
+                logger.debug(f'加载标签列表失败: {e}')
+        # 恢复之前的选择
+        idx = self.tag_filter.findText(current)
+        if idx >= 0:
+            self.tag_filter.setCurrentIndex(idx)
+        self.tag_filter.blockSignals(False)
+    
+    def perform_search(self, query=None):
         """
         执行搜索操作
         
@@ -110,22 +149,36 @@ class SearchDialog(QDialog):
         self.results_list.clear()
         self.search_results = []
         
+        # 刷新标签过滤列表
+        self.refresh_tag_filter()
+        
+        if query is None:
+            query = self.search_input.text()
+        
         if len(query.strip()) < 1:
             self.result_label.setText('请输入关键词开始搜索')
             self.open_button.setEnabled(False)
             return
         
         query_lower = query.lower().strip()
+        selected_tag = self.tag_filter.currentText()
         
-        # 搜索已打开的便签
+        # 搜索已打开的便签（带相关度评分）
         for note_id, note in self.manager.notes.items():
             title = note.note_data.get('title', '').lower()
             content = note.note_data.get('content', '').lower()
+            tags = note.note_data.get('tags', [])
             
             if query_lower in title or query_lower in content:
-                self.search_results.append((note_id, note, True))  # True表示已打开
+                # 标签过滤
+                if selected_tag != '全部标签' and selected_tag not in tags:
+                    continue
+                score = self._compute_relevance(query_lower, title, content, tags)
+                self.search_results.append((note_id, note, True, score))  # True表示已打开
         
-        # 搜索未打开的便签文件
+        # 搜索未打开的便签文件（使用 LRU 缓存加速）
+        from features.performance import get_note_cache
+        cache = get_note_cache()
         notes_dir = self.manager.notes_dir
         if os.path.exists(notes_dir):
             for filename in os.listdir(notes_dir):
@@ -138,21 +191,51 @@ class SearchDialog(QDialog):
                         if note_id in self.manager.notes:
                             continue
                         
-                        # 读取便签数据
-                        note_file = os.path.join(notes_dir, filename)
-                        with open(note_file, 'r', encoding='utf-8') as f:
-                            note_data = json.load(f)
+                        # 先查缓存
+                        note_data = cache.get(note_id)
+                        if note_data is None:
+                            # 未命中，从磁盘读取并缓存
+                            note_file = os.path.join(notes_dir, filename)
+                            with open(note_file, 'r', encoding='utf-8') as f:
+                                note_data = json.load(f)
+                            cache.put(note_id, note_data)
                         
                         title = note_data.get('title', '').lower()
                         content = note_data.get('content', '').lower()
+                        tags = note_data.get('tags', [])
                         
                         if query_lower in title or query_lower in content:
-                            self.search_results.append((note_id, note_data, False))  # False表示未打开
+                            # 标签过滤
+                            if selected_tag != '全部标签' and selected_tag not in tags:
+                                continue
+                            score = self._compute_relevance(query_lower, title, content, tags)
+                            self.search_results.append((note_id, note_data, False, score))  # False表示未打开
                     
                     except Exception as e:
-                        print(f"搜索便签文件 {filename} 时出错: {e}")
+                        logger.warning(f"搜索便签文件 {filename} 时出错: {e}")
+        
+        # 按相关度降序排列
+        self.search_results.sort(key=lambda x: x[3], reverse=True)
         
         self.update_results_display()
+    
+    def _compute_relevance(self, query, title, content, tags):
+        """
+        计算搜索结果相关度分数
+        
+        标题精确匹配 > 标题包含 > 内容精确匹配 > 内容包含
+        """
+        score = 0
+        if query == title:
+            score += 10
+        elif query in title:
+            score += 5
+        if query in content:
+            score += 2
+        import re
+        if re.search(r'\b' + re.escape(query) + r'\b', title):
+            score += 3
+        return score
     
     def update_results_display(self):
         """
@@ -167,7 +250,7 @@ class SearchDialog(QDialog):
         
         self.result_label.setText(f'找到 {len(self.search_results)} 个匹配的便签')
         
-        for note_id, note_data_or_note, is_opened in self.search_results:
+        for note_id, note_data_or_note, is_opened, score in self.search_results:
             if is_opened:
                 # 已打开的便签
                 note = note_data_or_note
@@ -183,8 +266,8 @@ class SearchDialog(QDialog):
             
             # 截取内容预览
             content_preview = content.replace('\n', ' ').strip()
-            if len(content_preview) > 50:
-                content_preview = content_preview[:50] + '...'
+            if len(content_preview) > 100:
+                content_preview = content_preview[:100] + '...'
             
             # 创建列表项
             item_text = f"{status} {title}"
@@ -275,6 +358,37 @@ class SearchManager:
         """
         self.manager = manager
         self.search_dialog = None
+        self._note_index: dict = {}  # {note_id: {'title': str, 'content': str, 'tags': list}}
+        self._index_built = False
+        self._build_or_refresh_index()
+
+    def _build_or_refresh_index(self):
+        """构建或刷新搜索索引，缓存所有便签的标题和内容"""
+        self._note_index.clear()
+        notes_dir = self.manager.notes_dir
+        if not os.path.exists(notes_dir):
+            self._index_built = True
+            return
+        for filename in os.listdir(notes_dir):
+            if filename.startswith('note_') and filename.endswith('.json'):
+                try:
+                    note_id_str = filename.split('_')[1].split('.')[0]
+                    note_id = int(note_id_str)
+                    note_file = os.path.join(notes_dir, filename)
+                    with open(note_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    self._note_index[note_id] = {
+                        'title': data.get('title', '').lower(),
+                        'content': data.get('content', '').lower(),
+                        'tags': data.get('tags', []),
+                    }
+                except Exception as e:
+                    logger.debug(f'索引便签 {filename} 时出错: {e}')
+        self._index_built = True
+
+    def refresh_index(self):
+        """刷新搜索索引（便签变更后调用）"""
+        self._build_or_refresh_index()
     
     def show_search_dialog(self):
         """
@@ -289,7 +403,7 @@ class SearchManager:
     
     def search_notes(self, query):
         """
-        搜索便签（程序化接口）
+        搜索便签（程序化接口，使用索引加速）
         
         Args:
             query: 搜索查询字符串
@@ -302,7 +416,11 @@ class SearchManager:
         
         if not query_lower:
             return results
-        
+
+        # 确保索引已构建
+        if not self._index_built:
+            self._build_or_refresh_index()
+
         # 搜索已打开的便签
         for note_id, note in self.manager.notes.items():
             title = note.note_data.get('title', '').lower()
@@ -311,31 +429,11 @@ class SearchManager:
             if query_lower in title or query_lower in content:
                 results.append((note_id, note.note_data, True))
         
-        # 搜索未打开的便签文件
-        notes_dir = self.manager.notes_dir
-        if os.path.exists(notes_dir):
-            for filename in os.listdir(notes_dir):
-                if filename.startswith('note_') and filename.endswith('.json'):
-                    try:
-                        note_id_str = filename.split('_')[1].split('.')[0]
-                        note_id = int(note_id_str)
-                        
-                        # 跳过已打开的便签
-                        if note_id in self.manager.notes:
-                            continue
-                        
-                        # 读取便签数据
-                        note_file = os.path.join(notes_dir, filename)
-                        with open(note_file, 'r', encoding='utf-8') as f:
-                            note_data = json.load(f)
-                        
-                        title = note_data.get('title', '').lower()
-                        content = note_data.get('content', '').lower()
-                        
-                        if query_lower in title or query_lower in content:
-                            results.append((note_id, note_data, False))
-                    
-                    except Exception as e:
-                        print(f"搜索便签文件 {filename} 时出错: {e}")
+        # 使用索引搜索未打开的便签
+        for note_id, index_entry in self._note_index.items():
+            if note_id in self.manager.notes:
+                continue  # 跳过已打开的
+            if query_lower in index_entry['title'] or query_lower in index_entry['content']:
+                results.append((note_id, index_entry, False))
         
         return results

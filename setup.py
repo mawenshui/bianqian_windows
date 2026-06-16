@@ -19,6 +19,7 @@ build_exe_options = {
     'build_exe': 'dist/StickyNote',
     'packages': [
         'PyQt5', 'pywintypes', 'win32api', 'win32con', 'win32gui',
+        'cryptography', 'argon2', 'markdown', 'pygments',
     ],
     'includes': [
         'win32timezone', 'pythoncom',
@@ -31,7 +32,7 @@ build_exe_options = {
         'PyQt5.QtSql', 'PyQt5.QtNetwork', 'PyQt5.QtSvg',
         'PyQt5.QtXml', 'PyQt5.QtWebEngine', 'PyQt5.QtMultimedia',
         'PyQt5.QtMultimediaWidgets', 'PyQt5.QtWebEngineWidgets',
-        'PyQt5.QtWebChannel', 'PyQt5.QtOpenGL', 'PyQt5.QtPrintSupport',
+        'PyQt5.QtWebChannel', 'PyQt5.QtOpenGL',
     ],
 }
 
@@ -138,7 +139,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.6.1',
+    version='1.7.0',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={
