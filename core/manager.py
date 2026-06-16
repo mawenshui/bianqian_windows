@@ -1152,9 +1152,11 @@ class StickyNoteManager:
         self._progress_dialog = UpdateProgressDialog(size_mb)
         self._progress_dialog.show()
 
-        # 启动下载（统一下载 ZIP，不再需要 install_type 参数）
+        # 启动下载
         self._update_downloader = UpdateDownloader(download_url, asset_name)
         self._update_downloader.progress.connect(self._on_download_progress)
+        self._update_downloader.status_update.connect(self._on_download_status)
+        self._update_downloader.source_changed.connect(self._on_download_source_changed)
         self._update_downloader.download_finished.connect(self._on_download_finished)
         self._update_downloader.download_failed.connect(self._on_download_failed)
         self._update_downloader.start()
@@ -1188,6 +1190,14 @@ class StickyNoteManager:
     def _on_download_progress(self, percent: int) -> None:
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.set_progress(percent)
+
+    def _on_download_status(self, text: str) -> None:
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.set_status(text)
+
+    def _on_download_source_changed(self, source_name: str) -> None:
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.set_source(source_name)
 
     def _on_download_finished(self, file_path: str) -> None:
         """ZIP 下载完成"""
@@ -1241,7 +1251,15 @@ class StickyNoteManager:
         if hasattr(self, '_progress_dialog') and self._progress_dialog:
             self._progress_dialog.accept()
             self._progress_dialog = None
-        QMessageBox.warning(None, '下载失败', error_msg)
+        # 使用详细错误对话框
+        from PyQt5.QtWidgets import QMessageBox
+        msg_box = QMessageBox(None)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle('下载更新失败')
+        msg_box.setText('更新文件下载失败，所有下载源均无法使用。')
+        msg_box.setDetailedText(error_msg)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
         self._restore_manual_check_btn()
 
     # ==================== 应用生命周期 ====================

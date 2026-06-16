@@ -41,11 +41,19 @@ VERSION_CHECK_ENDPOINTS = [
 GITHUB_DOWNLOAD_TIMEOUT = 60       # GitHub 主链接
 MIRROR_DOWNLOAD_TIMEOUT = 120      # 镜像备用链接（较慢）
 VERSION_CHECK_TIMEOUT = 30         # 版本检查请求（国内网络较慢，延长至30秒）
+CONNECTION_TEST_TIMEOUT = 8        # 连接测试超时（秒）
 
 DOWNLOAD_CHUNK_SIZE = 128 * 1024   # 128KB
 
-# 国内加速镜像（ghproxy.com）
-MIRROR_PREFIX = 'https://ghproxy.com/'
+# 下载源列表（按优先级排序，依次尝试）
+# 每个源: (名称, URL前缀, 超时秒数)
+# 特殊前缀 '{url}' 表示直接使用原始URL（GitHub官方）
+DOWNLOAD_SOURCES = [
+    ('GitHub 官方源', '{url}', GITHUB_DOWNLOAD_TIMEOUT),
+    ('ghfast.top 镜像', 'https://ghfast.top/{url}', MIRROR_DOWNLOAD_TIMEOUT),
+    ('ghproxy.net 镜像', 'https://ghproxy.net/{url}', MIRROR_DOWNLOAD_TIMEOUT),
+    ('gh-proxy.com 镜像', 'https://gh-proxy.com/{url}', MIRROR_DOWNLOAD_TIMEOUT),
+]
 
 
 # ==================== 工具函数 ====================
@@ -92,21 +100,77 @@ def detect_install_type():
 
 def get_download_urls(original_url):
     """
-    生成下载 URL 列表（主链接 + 备用镜像）。
+    生成下载 URL 列表（官方源 + 多个国内镜像）。
     
     Args:
         original_url: GitHub 资产的 browser_download_url
     
     Returns:
-        [(url, timeout_seconds), ...] 优先级从高到低
+        [(source_name, url, timeout_seconds), ...] 优先级从高到低
     """
-    urls = [
-        (original_url, GITHUB_DOWNLOAD_TIMEOUT),
-    ]
-    # 国内加速镜像
-    if MIRROR_PREFIX:
-        urls.append((MIRROR_PREFIX + original_url, MIRROR_DOWNLOAD_TIMEOUT))
+    urls = []
+    for name, prefix, timeout in DOWNLOAD_SOURCES:
+        if prefix == '{url}':
+            url = original_url
+        else:
+            url = prefix.replace('{url}', original_url)
+        urls.append((name, url, timeout))
     return urls
+
+
+def test_connection(url, timeout=CONNECTION_TEST_TIMEOUT):
+    """
+    测试 URL 连通性（发送 HEAD 请求或小型 GET 请求）。
+    
+    Args:
+        url: 待测试的 URL
+        timeout: 超时秒数
+    
+    Returns:
+        (success: bool, error_msg: str)
+    """
+    try:
+        req = urllib.request.Request(url, method='HEAD')
+        req.add_header('User-Agent', 'StickyNote-Updater')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = resp.getcode()
+            if 200 <= code < 400:
+                return (True, '')
+            return (False, f'HTTP {code}')
+    except urllib.error.HTTPError as e:
+        # HEAD 不支持时尝试 GET（Range 只取前 1KB）
+        if e.code == 405 or e.code == 403:
+            try:
+                req2 = urllib.request.Request(url)
+                req2.add_header('Range', 'bytes=0-1023')
+                req2.add_header('User-Agent', 'StickyNote-Updater')
+                with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+                    return (True, '')
+            except Exception as e2:
+                return (False, _format_error(e2))
+        return (False, f'HTTP {e.code}: {e.reason}')
+    except Exception as e:
+        return (False, _format_error(e))
+
+
+def _format_error(e):
+    """将异常格式化为可读的错误描述"""
+    if isinstance(e, socket.timeout):
+        return '连接超时'
+    elif isinstance(e, urllib.error.URLError):
+        reason = str(e.reason)
+        if 'timed out' in reason.lower():
+            return '连接超时'
+        elif 'Name or service not known' in reason or 'getaddrinfo' in reason:
+            return 'DNS 解析失败'
+        elif 'Connection refused' in reason:
+            return '连接被拒绝'
+        elif 'No route to host' in reason:
+            return '无法路由到目标主机'
+        return f'网络错误: {reason}'
+    elif isinstance(e, ConnectionError):
+        return f'连接错误: {e}'
+    return str(e)
 
 
 # ==================== UpdateChecker ====================
@@ -198,11 +262,13 @@ class UpdateChecker(QThread):
 # ==================== UpdateDownloader ====================
 
 class UpdateDownloader(QThread):
-    """后台下载更新文件，内置主/备双链路"""
+    """后台下载更新文件，支持多源自动切换、连接测试、自动重试"""
     
     progress = pyqtSignal(int)
     download_finished = pyqtSignal(str)
     download_failed = pyqtSignal(str)
+    status_update = pyqtSignal(str)     # 状态消息（当前源、连接测试等）
+    source_changed = pyqtSignal(str)    # 当前使用的下载源名称
     
     def __init__(self, download_url, asset_name):
         super().__init__()
@@ -215,60 +281,122 @@ class UpdateDownloader(QThread):
         self._aborted = True
     
     def run(self):
-        urls = get_download_urls(self._download_url)
-        last_error = ''
+        sources = get_download_urls(self._download_url)
+        errors = []  # 收集每个源的失败原因
         
-        for url, timeout in urls:
+        # 阶段 1: 连接测试，找到第一个可用的源
+        self.status_update.emit('正在测试下载源连通性...')
+        available_sources = []
+        
+        for source_name, url, timeout in sources:
             if self._aborted:
                 return
+            self.status_update.emit(f'正在测试 {source_name}...')
+            ok, err_msg = test_connection(url, CONNECTION_TEST_TIMEOUT)
+            if ok:
+                available_sources.append((source_name, url, timeout))
+                self.status_update.emit(f'{source_name} ✓ 可用')
+                break  # 找到第一个可用的就开始下载
+            else:
+                errors.append((source_name, err_msg))
+                self.status_update.emit(f'{source_name} ✗ {err_msg}')
+        
+        if not available_sources:
+            # 所有源都不可用，但仍尝试第一个源（连接测试可能误判）
+            self.status_update.emit('连接测试均失败，尝试直接下载...')
+            available_sources = [(sources[0][0], sources[0][1], sources[0][2])]
+        
+        # 阶段 2: 依次尝试可用源下载
+        for source_name, url, timeout in available_sources:
+            if self._aborted:
+                return
+            
+            self.source_changed.emit(source_name)
+            self.status_update.emit(f'正在通过 {source_name} 下载...')
+            self.status_update.emit(f'URL: {url[:80]}...' if len(url) > 80 else f'URL: {url}')
+            
             try:
-                result = self._try_download(url, timeout)
+                result = self._try_download(url, timeout, source_name)
                 if result:
                     self.download_finished.emit(result)
                     return
             except Exception as e:
-                last_error = str(e)
+                err_detail = _format_error(e)
+                errors.append((source_name, err_detail))
+                self.status_update.emit(f'{source_name} 下载失败: {err_detail}')
                 continue
         
-        self.download_failed.emit(
-            f'所有下载源均不可用。\n\n'
-            f'原始链接: {self._download_url}\n'
-            f'错误信息: {last_error}\n\n'
-            f'请检查网络连接或前往 GitHub Releases 手动下载。'
-        )
+        # 所有源都失败，尝试剩余未测试的源
+        tested_names = {s[0] for s in available_sources}
+        for source_name, url, timeout in sources:
+            if source_name in tested_names or self._aborted:
+                continue
+            self.source_changed.emit(source_name)
+            self.status_update.emit(f'正在尝试备用源 {source_name}...')
+            try:
+                result = self._try_download(url, timeout, source_name)
+                if result:
+                    self.download_finished.emit(result)
+                    return
+            except Exception as e:
+                errors.append((source_name, _format_error(e)))
+                continue
+        
+        # 全部失败，生成详细错误报告
+        self._emit_failure(errors)
     
-    def _try_download(self, url, timeout):
+    def _try_download(self, url, timeout, source_name=''):
         """尝试从单个 URL 下载"""
-        try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                total_size = int(resp.headers.get('Content-Length', 0))
-                downloaded = 0
-                chunks = []
-                
-                while True:
-                    if self._aborted:
-                        return None
-                    chunk = resp.read(DOWNLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        pct = int(downloaded * 100 / total_size)
-                        self.progress.emit(pct)
-                
-                # 写入临时文件
-                temp_dir = tempfile.mkdtemp(prefix='stickynote_update_')
-                temp_path = os.path.join(temp_dir, self._asset_name)
-                with open(temp_path, 'wb') as f:
-                    for chunk in chunks:
-                        f.write(chunk)
-                
-                return temp_path
-                
-        except Exception as e:
-            raise  # 抛给父调用者处理
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', 'StickyNote-Updater')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total_size = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunks = []
+            
+            while True:
+                if self._aborted:
+                    return None
+                chunk = resp.read(DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    pct = int(downloaded * 100 / total_size)
+                    self.progress.emit(pct)
+            
+            if not chunks:
+                raise Exception('下载内容为空')
+            
+            # 写入临时文件
+            temp_dir = tempfile.mkdtemp(prefix='stickynote_update_')
+            temp_path = os.path.join(temp_dir, self._asset_name)
+            with open(temp_path, 'wb') as f:
+                for chunk in chunks:
+                    f.write(chunk)
+            
+            return temp_path
+    
+    def _emit_failure(self, errors):
+        """生成详细的失败报告并发送信号"""
+        error_lines = []
+        for source_name, err_msg in errors:
+            error_lines.append(f'  • {source_name}: {err_msg}')
+        
+        error_detail = '\n'.join(error_lines) if error_lines else '  • 无可用错误信息'
+        
+        msg = (
+            f'所有下载源均不可用，更新下载失败。\n\n'
+            f'尝试过的下载源:\n{error_detail}\n\n'
+            f'原始链接:\n{self._download_url}\n\n'
+            f'建议:\n'
+            f'  1. 检查网络连接是否正常\n'
+            f'  2. 尝试关闭 VPN 或代理后重试\n'
+            f'  3. 前往 GitHub Releases 页面手动下载:\n'
+            f'     https://github.com/{GITHUB_REPO}/releases'
+        )
+        self.download_failed.emit(msg)
 
 
 # ==================== UpdateDialog ====================
@@ -366,19 +494,33 @@ class UpdateProgressDialog(QDialog):
     
     def _init_ui(self, total_size_mb):
         self.setWindowTitle('正在下载更新...')
-        self.setFixedSize(400, 150)
+        self.setFixedSize(480, 200)
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
         
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
         
-        self._status_label = QLabel('正在连接 GitHub...')
+        # 状态标签（显示当前阶段）
+        self._status_label = QLabel('正在测试下载源连通性...')
+        self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
         
+        # 下载源标签
+        self._source_label = QLabel('')
+        self._source_label.setStyleSheet('color: #4a86e8; font-weight: bold;')
+        self._source_label.setWordWrap(True)
+        layout.addWidget(self._source_label)
+        
+        # 进度条
         self._progress_bar = QProgressBar()
         self._progress_bar.setValue(0)
         layout.addWidget(self._progress_bar)
+        
+        # 进度文本
+        self._progress_label = QLabel('')
+        self._progress_label.setStyleSheet('color: #666; font-size: 9pt;')
+        layout.addWidget(self._progress_label)
         
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -391,11 +533,13 @@ class UpdateProgressDialog(QDialog):
     
     def set_progress(self, percent):
         self._progress_bar.setValue(percent)
-        size_text = f'{percent}%' if percent > 0 else '正在连接...'
-        self._status_label.setText(f'下载进度: {size_text}')
+        self._progress_label.setText(f'下载进度: {percent}%')
     
     def set_status(self, text):
         self._status_label.setText(text)
+    
+    def set_source(self, source_name):
+        self._source_label.setText(f'下载源: {source_name}')
     
     def _on_cancel(self):
         self._cancelled = True

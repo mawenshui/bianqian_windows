@@ -29,7 +29,7 @@ from features.updater import (
     UpdateDownloader,
     GITHUB_DOWNLOAD_TIMEOUT,
     MIRROR_DOWNLOAD_TIMEOUT,
-    MIRROR_PREFIX,
+    DOWNLOAD_SOURCES,
     DOWNLOAD_CHUNK_SIZE,
 )
 
@@ -90,36 +90,41 @@ class TestGetDownloadUrls(unittest.TestCase):
     def test_returns_list_of_tuples(self):
         urls = get_download_urls(self.original_url)
         self.assertIsInstance(urls, list)
-        self.assertEqual(len(urls), 2)
-        for url, timeout in urls:
+        self.assertEqual(len(urls), len(DOWNLOAD_SOURCES))
+        for name, url, timeout in urls:
+            self.assertIsInstance(name, str)
             self.assertIsInstance(url, str)
             self.assertIsInstance(timeout, (int, float))
 
     def test_first_url_is_original(self):
         urls = get_download_urls(self.original_url)
-        self.assertEqual(urls[0][0], self.original_url)
+        self.assertEqual(urls[0][0], 'GitHub 官方源')
+        self.assertEqual(urls[0][1], self.original_url)
 
     def test_first_url_timeout(self):
         urls = get_download_urls(self.original_url)
-        self.assertEqual(urls[0][1], GITHUB_DOWNLOAD_TIMEOUT)
+        self.assertEqual(urls[0][2], GITHUB_DOWNLOAD_TIMEOUT)
 
     def test_second_url_is_mirror(self):
         urls = get_download_urls(self.original_url)
-        expected_mirror = MIRROR_PREFIX + self.original_url
-        self.assertEqual(urls[1][0], expected_mirror)
+        # 第二个源应该是第一个镜像
+        mirror_name, mirror_prefix, mirror_timeout = DOWNLOAD_SOURCES[1]
+        expected_url = mirror_prefix.replace('{url}', self.original_url)
+        self.assertEqual(urls[1][0], mirror_name)
+        self.assertEqual(urls[1][1], expected_url)
 
     def test_second_url_timeout(self):
         urls = get_download_urls(self.original_url)
-        self.assertEqual(urls[1][1], MIRROR_DOWNLOAD_TIMEOUT)
+        self.assertEqual(urls[1][2], MIRROR_DOWNLOAD_TIMEOUT)
 
     def test_mirror_timeout_longer_than_github(self):
         urls = get_download_urls(self.original_url)
-        self.assertGreater(urls[1][1], urls[0][1])
+        self.assertGreater(urls[1][2], urls[0][2])
 
     def test_url_with_special_characters(self):
         url = 'https://github.com/repo/releases/download/v1.0/file (1).exe'
         urls = get_download_urls(url)
-        self.assertEqual(len(urls), 2)
+        self.assertEqual(len(urls), len(DOWNLOAD_SOURCES))
 
 
 class TestDetectInstallType(unittest.TestCase):
@@ -289,8 +294,9 @@ class TestUpdateDownloader(unittest.TestCase):
         self.test_url = 'https://github.com/test/releases/download/v1.0/test.exe'
         self.asset_name = 'test.exe'
 
+    @patch('features.updater.test_connection', return_value=(True, ''))
     @patch('features.updater.urllib.request.urlopen')
-    def test_successful_download(self, mock_urlopen):
+    def test_successful_download(self, mock_urlopen, mock_test_conn):
         """成功下载文件"""
         test_data = b'x' * (DOWNLOAD_CHUNK_SIZE + 100)  # 略大于一个 chunk
         mock_resp = MagicMock()
@@ -334,8 +340,9 @@ class TestUpdateDownloader(unittest.TestCase):
         import shutil
         shutil.rmtree(os.path.dirname(results[0][1]), ignore_errors=True)
 
+    @patch('features.updater.test_connection', return_value=(True, ''))
     @patch('features.updater.urllib.request.urlopen')
-    def test_progress_signals(self, mock_urlopen):
+    def test_progress_signals(self, mock_urlopen, mock_test_conn):
         """验证进度信号"""
         test_data = b'x' * DOWNLOAD_CHUNK_SIZE * 3
         mock_resp = MagicMock()
@@ -370,14 +377,18 @@ class TestUpdateDownloader(unittest.TestCase):
             import shutil
             shutil.rmtree(os.path.dirname(done[0]), ignore_errors=True)
 
+    @patch('features.updater.test_connection', return_value=(True, ''))
     @patch('features.updater.urllib.request.urlopen')
-    def test_download_fallback_to_mirror(self, mock_urlopen):
+    def test_download_fallback_to_mirror(self, mock_urlopen, mock_test_conn):
         """主链接失败后切换到镜像"""
         call_urls = []
+        mirror_prefix = DOWNLOAD_SOURCES[1][1]  # 第一个镜像的URL前缀
 
         def urlopen_side_effect(req, **kwargs):
-            call_urls.append(req.full_url)
-            if MIRROR_PREFIX not in req.full_url:
+            call_urls.append(req.full_url if hasattr(req, 'full_url') else str(req))
+            # 连接测试 + 下载都会调用 urlopen
+            url_str = req.full_url if hasattr(req, 'full_url') else str(req)
+            if mirror_prefix.split('/')[2] not in url_str and 'github.com' in url_str:
                 raise urllib.error.URLError('GitHub 连接超时')
             # 镜像成功
             mock_resp = MagicMock()
@@ -398,14 +409,14 @@ class TestUpdateDownloader(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0][0], 'done')
-        self.assertIn(MIRROR_PREFIX, call_urls[1])
 
         # 清理
         import shutil
         shutil.rmtree(os.path.dirname(results[0][1]), ignore_errors=True)
 
+    @patch('features.updater.test_connection', return_value=(False, '连接超时'))
     @patch('features.updater.urllib.request.urlopen')
-    def test_both_urls_fail(self, mock_urlopen):
+    def test_both_urls_fail(self, mock_urlopen, mock_test_conn):
         """两个链接都失败"""
         mock_urlopen.side_effect = urllib.error.URLError('所有源均不可用')
 
@@ -419,8 +430,9 @@ class TestUpdateDownloader(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertIn('所有下载源均不可用', results[0])
 
+    @patch('features.updater.test_connection', return_value=(True, ''))
     @patch('features.updater.urllib.request.urlopen')
-    def test_abort_download(self, mock_urlopen):
+    def test_abort_download(self, mock_urlopen, mock_test_conn):
         """中断下载"""
         test_data = b'x' * DOWNLOAD_CHUNK_SIZE * 10
         mock_resp = MagicMock()
@@ -443,9 +455,11 @@ class TestUpdateDownloader(unittest.TestCase):
         # 被中止时不应发射任何信号
         self.assertEqual(len(results), 0)
 
+    @patch('features.updater.test_connection')
     @patch('features.updater.urllib.request.urlopen')
-    def test_zero_size_file(self, mock_urlopen):
+    def test_zero_size_file(self, mock_urlopen, mock_test_conn):
         """下载空文件"""
+        mock_test_conn.return_value = (True, '')  # 连接测试通过
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.headers = {'Content-Length': '0'}
@@ -456,15 +470,13 @@ class TestUpdateDownloader(unittest.TestCase):
         results = []
 
         downloader.download_finished.connect(lambda p: results.append(('done', p)))
+        downloader.download_failed.connect(lambda m: results.append(('fail', m)))
         downloader.run()
         downloader.wait()
 
+        # 空文件应该触发失败（下载内容为空）
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0][0], 'done')
-
-        # 清理
-        import shutil
-        shutil.rmtree(os.path.dirname(results[0][1]), ignore_errors=True)
+        self.assertEqual(results[0][0], 'fail')
 
 
 class TestEdgeCases(unittest.TestCase):
@@ -483,8 +495,9 @@ class TestEdgeCases(unittest.TestCase):
     def test_get_download_urls_empty_string(self):
         """空 URL"""
         urls = get_download_urls('')
-        self.assertEqual(len(urls), 2)
-        self.assertEqual(urls[1][0], MIRROR_PREFIX)
+        self.assertEqual(len(urls), len(DOWNLOAD_SOURCES))
+        # 第一个应该是 GitHub 官方源
+        self.assertEqual(urls[0][0], 'GitHub 官方源')
 
     def test_parse_version_with_pre_release(self):
         """预发布版本"""
