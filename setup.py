@@ -13,6 +13,7 @@ project_dir = os.path.dirname(os.path.abspath(__file__))
 include_files = [
     (os.path.join(project_dir, 'styles'), 'styles'),
     (os.path.join(project_dir, 'plugins'), 'plugins'),
+    (os.path.join(project_dir, 'readme.md'), 'readme.md'),
 ]
 
 # 构建选项
@@ -140,7 +141,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.7.2',
+    version='1.7.3',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={

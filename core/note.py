@@ -1309,23 +1309,8 @@ class StickyNote(QWidget):
 
     def show_quick_help(self):
         """显示便签快速使用提示"""
-        help_text = (
-            '📝 便签使用说明\n\n'
-            '📌 基本操作\n'
-            '  • 拖拽标题栏或空白区域可移动便签\n'
-            '  • 鼠标移到边缘会出现缩放光标，拖拽可调整大小\n'
-            '  • 拖拽便签到屏幕边缘松手可贴边自动隐藏\n'
-            '  • 右键点击便签可切换主题、设置字体等\n\n'
-            '✏️ 文字格式（需先选中文字）\n'
-            '  • A+ / A- ：增大 / 减小字体大小\n'
-            '  • B ：加粗    I ：斜体\n'
-            '  • A(颜色) ：改变字体颜色\n\n'
-            '💡 更多功能\n'
-            '  • 右下角托盘图标右键 → 帮助 → 查看完整说明\n'
-            '  • Ctrl+Shift+N 全局快捷键新建便签\n'
-            '  • Ctrl+Shift+F 搜索便签内容'
-        )
-        QMessageBox.information(self, '使用说明', help_text)
+        from features.help_content import get_quick_help_text
+        QMessageBox.information(self, '使用说明', get_quick_help_text())
 
     def _update_undo_redo_buttons(self, can_undo, can_redo):
         """根据撤销/重做栈状态更新工具栏按钮"""

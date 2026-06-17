@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "StickyNote"
-version = "1.7.2"
+version = "1.7.3"
 description = "桌面便签应用 — 一款轻量级的 Windows 桌面便签工具"
 authors = [{name = "MaWenshui"}]
 readme = "readme.md"

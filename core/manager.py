@@ -760,13 +760,21 @@ class StickyNoteManager:
             self.settings_dialog = None
 
     def show_help_dialog(self) -> None:
-        """显示完整的帮助使用说明对话框"""
+        """显示完整的帮助使用说明对话框（动态读取 readme.md 渲染）"""
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QLabel
+        from features.help_content import get_full_help_html
+        from features.theme_helper import apply_dialog_theme, get_current_theme_css
 
         dialog = QDialog(None)
         dialog.setWindowTitle('桌面便签 — 完整使用说明')
-        dialog.setFixedSize(550, 520)
+        dialog.setFixedSize(650, 600)
         dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+
+        # 应用主题
+        try:
+            apply_dialog_theme(dialog, get_current_theme_css(self))
+        except Exception:
+            pass
 
         layout = QVBoxLayout()
         layout.setContentsMargins(12, 12, 12, 12)
@@ -774,63 +782,7 @@ class StickyNoteManager:
 
         help_text = QTextEdit()
         help_text.setReadOnly(True)
-        help_text.setHtml(f'''
-<h2>📝 桌面便签 — 完整使用说明</h2>
-<p style="color:#888; font-size:10pt;">当前版本: v{__version__} | 作者: MaWenshui</p>
-
-<h3>📌 基本操作</h3>
-<ul>
-  <li><b>拖拽移动：</b>按住便签空白区域拖拽可移动位置</li>
-  <li><b>缩放调整：</b>鼠标移到便签边缘会变成双向箭头，拖拽即可调整大小</li>
-  <li><b>贴边自动隐藏：</b>将便签拖拽到屏幕边缘（紧贴边缘）松手，便签会自动隐藏，仅留下一个标题标签页。鼠标悬停或点击标签页即可恢复便签</li>
-  <li><b>关闭/隐藏：</b>点击关闭按钮（×）会将便签隐藏到托盘，不会丢失数据</li>
-</ul>
-
-<h3>✏️ 文字格式（需先选中文字）</h3>
-<ul>
-  <li><b>A+ / A- 按钮：</b>增大或减小选中文字的字体大小</li>
-  <li><b>B 按钮：</b>将选中文字设为加粗</li>
-  <li><b>I 按钮：</b>将选中文字设为斜体</li>
-  <li><b>A(颜色) 按钮：</b>改变选中文字的字体颜色</li>
-  <li><b>透明度滑块：</b>调整便签整体透明度</li>
-</ul>
-
-<h3>🎨 主题与外观</h3>
-<ul>
-  <li><b>右键菜单：</b>在便签空白处右键可切换主题、设置字体</li>
-  <li><b>始终置顶：</b>勾选"总在最前"可使便签始终显示在其他窗口之上</li>
-  <li><b>智能格式化：</b>勾选后粘贴内容时自动格式化</li>
-</ul>
-
-<h3>🏷 标签与提醒</h3>
-<ul>
-  <li><b>标签按钮（🏷）：</b>为便签添加标签，方便分类管理。右键托盘菜单可按标签分组查看</li>
-  <li><b>提醒按钮（⏰）：</b>设置定时提醒，到时间后托盘会弹出通知</li>
-</ul>
-
-<h3>⌨ 快捷键</h3>
-<ul>
-  <li><b>Ctrl+Shift+N：</b>全局新建便签</li>
-  <li><b>Ctrl+Shift+F：</b>打开便签搜索</li>
-  <li><b>Ctrl+Shift+B：</b>打开备份管理</li>
-  <li><b>Ctrl+Z / Ctrl+Y：</b>撤销 / 重做</li>
-</ul>
-
-<h3>🔍 搜索与备份</h3>
-<ul>
-  <li><b>搜索便签：</b>托盘菜单 → 搜索便签，可搜索所有便签的标题和内容</li>
-  <li><b>备份管理：</b>托盘菜单 → 备份管理，支持导出/恢复备份 ZIP 文件</li>
-  <li><b>模板创建：</b>托盘菜单 → 从模板创建，使用预设模板快速创建便签</li>
-  <li><b>导入导出：</b>托盘菜单 → 导入导出，支持便签数据的导入和导出</li>
-</ul>
-
-<h3>💡 小技巧</h3>
-<ul>
-  <li>双击托盘图标可快速打开最近使用的便签</li>
-  <li>贴边隐藏的便签标签页始终置顶，方便随时找回</li>
-  <li>可以在设置中修改默认字体和主题</li>
-</ul>
-        ''')
+        help_text.setHtml(get_full_help_html())
         layout.addWidget(help_text)
 
         btn_layout = QHBoxLayout()

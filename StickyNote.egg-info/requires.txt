@@ -1,0 +1,17 @@
+PyQt5>=5.15
+pywin32>=305
+
+[all]
+StickyNote[crypto,markdown,sync]
+
+[crypto]
+cryptography>=41.0
+argon2-cffi>=23.1
+
+[markdown]
+markdown>=3.5
+Pygments>=2.17
+
+[sync]
+requests>=2.31
+webdavclient3>=3.14
