@@ -7,6 +7,7 @@ StickyNote.egg-info/dependency_links.txt
 StickyNote.egg-info/entry_points.txt
 StickyNote.egg-info/requires.txt
 StickyNote.egg-info/top_level.txt
+tests/test_auto_hide.py
 tests/test_config.py
 tests/test_errors.py
 tests/test_manager_integration.py

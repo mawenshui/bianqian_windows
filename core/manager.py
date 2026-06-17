@@ -760,14 +760,14 @@ class StickyNoteManager:
             self.settings_dialog = None
 
     def show_help_dialog(self) -> None:
-        """显示完整的帮助使用说明对话框（动态读取 readme.md 渲染）"""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QLabel
-        from features.help_content import get_full_help_html
+        """显示完整的帮助使用说明对话框（Markdown 渲染，不可编辑）"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton, QHBoxLayout, QLabel
+        from features.help_content import get_full_help_html, get_help_css
         from features.theme_helper import apply_dialog_theme, get_current_theme_css
 
         dialog = QDialog(None)
         dialog.setWindowTitle('桌面便签 — 完整使用说明')
-        dialog.setFixedSize(650, 600)
+        dialog.setFixedSize(700, 620)
         dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
 
         # 应用主题
@@ -780,10 +780,14 @@ class StickyNoteManager:
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setHtml(get_full_help_html())
-        layout.addWidget(help_text)
+        # 使用 QTextBrowser（不可编辑）+ Markdown CSS 渲染
+        help_browser = QTextBrowser()
+        help_browser.setOpenExternalLinks(True)
+        css = get_help_css()
+        if css:
+            help_browser.document().setDefaultStyleSheet(css)
+        help_browser.setHtml(get_full_help_html())
+        layout.addWidget(help_browser)
 
         btn_layout = QHBoxLayout()
         version_label = QLabel(f'v{__version__}')

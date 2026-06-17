@@ -49,10 +49,10 @@ def get_full_help_html() -> str:
     获取完整帮助 HTML（从 readme.md 渲染）。
 
     使用 MarkdownRenderer 将 readme.md 转换为 HTML，
-    供 QTextEdit 或 QTextBrowser 显示。
+    供 QTextBrowser 通过 setDefaultStyleSheet + setHtml 显示。
 
     Returns:
-        str: 渲染后的 HTML 字符串
+        str: 渲染后的 HTML 字符串（body 内容）
     """
     global _cached_full_html
     if _cached_full_html:
@@ -60,7 +60,6 @@ def get_full_help_html() -> str:
 
     md_text = _read_readme()
     if not md_text:
-        # readme.md 不可用时使用回退内容
         _cached_full_html = _fallback_html()
         return _cached_full_html
 
@@ -74,6 +73,22 @@ def get_full_help_html() -> str:
         logger.warning(f'Markdown 渲染失败: {e}')
         _cached_full_html = _fallback_html()
         return _cached_full_html
+
+
+def get_help_css() -> str:
+    """
+    获取 Markdown 渲染用的 CSS 样式表。
+
+    用于 QTextBrowser.document().setDefaultStyleSheet()。
+
+    Returns:
+        str: CSS 样式表字符串
+    """
+    try:
+        from features.markdown_renderer import MarkdownRenderer
+        return MarkdownRenderer.DOCUMENT_CSS
+    except Exception:
+        return ''
 
 
 def get_quick_help_text() -> str:
