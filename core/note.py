@@ -1520,6 +1520,9 @@ class StickyNote(QWidget):
     # ==================== 窗口拖拽和调整大小 ====================
 
     def mousePressEvent(self, event):
+        # 自动隐藏状态下不响应鼠标事件（防止边缘残留触发拖拽/缩放）
+        if self.auto_hidden:
+            return
         if event.button() == Qt.LeftButton:
             # 用户点击便签内容，取消悬停恢复的自动缩回状态
             self._hover_restored = False
@@ -1558,6 +1561,10 @@ class StickyNote(QWidget):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 自动隐藏状态下不响应鼠标事件（防止边缘残留触发缩放）
+        if self.auto_hidden:
+            self.setCursor(QCursor(Qt.ArrowCursor))
+            return
         widget = self.childAt(event.pos())
         if widget in [self.title_edit, self.text_edit]:
             super().mouseMoveEvent(event)
@@ -1812,7 +1819,7 @@ class StickyNote(QWidget):
         self.hide_tab.move(x, y)
 
     def _slide_out_animation(self, edge):
-        """便签主窗口滑出屏幕的动画"""
+        """便签主窗口滑出屏幕的动画（完全移出屏幕，不残留任何像素）"""
         desktop = QApplication.desktop()
         if not desktop:
             return
@@ -1821,13 +1828,13 @@ class StickyNote(QWidget):
         w, h = self.width(), self.height()
 
         if edge == 'left':
-            target = QPoint(screen.left() - w + 1, current_pos.y())
+            target = QPoint(screen.left() - w, current_pos.y())
         elif edge == 'right':
-            target = QPoint(screen.right() - 1, current_pos.y())
+            target = QPoint(screen.right() + 1, current_pos.y())
         elif edge == 'top':
-            target = QPoint(current_pos.x(), screen.top() - h + 1)
+            target = QPoint(current_pos.x(), screen.top() - h)
         else:  # bottom
-            target = QPoint(current_pos.x(), screen.bottom() - 1)
+            target = QPoint(current_pos.x(), screen.bottom() + 1)
 
         self._slide_anim = QPropertyAnimation(self, b'pos')
         self._slide_anim.setDuration(250)
