@@ -25,6 +25,8 @@ build_exe_options = {
     ],
     'includes': [
         'win32timezone', 'pythoncom',
+        # 显式包含动态导入的关键模块（防止 cx_Freeze 静态分析遗漏）
+        'features.help_content', 'features.markdown_renderer',
     ],
     'include_files': include_files,
     'excludes': [
@@ -141,7 +143,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.7.5',
+    version='1.7.6',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={

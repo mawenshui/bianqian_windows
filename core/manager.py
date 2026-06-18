@@ -123,6 +123,7 @@ class StickyNoteManager:
         self.load_notes()
 
         self.settings_dialog = None
+        self._help_dialog = None
 
         # 自动检查更新（延迟3秒，避免影响启动速度）
         self._update_checker = None
@@ -760,15 +761,27 @@ class StickyNoteManager:
             self.settings_dialog = None
 
     def show_help_dialog(self) -> None:
-        """显示完整的帮助使用说明对话框（Markdown 渲染，不可编辑）"""
+        """显示完整的帮助使用说明窗口（可缩放/最大化，非模态）"""
+        # 如果已有打开的帮助窗口，先关闭
+        if self._help_dialog is not None:
+            try:
+                self._help_dialog.close()
+            except Exception:
+                pass
+            self._help_dialog = None
+
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton, QHBoxLayout, QLabel
-        from features.help_content import get_full_help_html, get_help_css
+        from features.help_content import get_help_content
         from features.theme_helper import apply_dialog_theme, get_current_theme_css
 
         dialog = QDialog(None)
         dialog.setWindowTitle('桌面便签 — 完整使用说明')
-        dialog.setFixedSize(700, 620)
-        dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        dialog.resize(720, 640)
+        dialog.setMinimumSize(500, 400)
+        # 窗口模式：可最小化、最大化、关闭，非模态
+        dialog.setWindowFlags(
+            Qt.Window | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+        )
 
         # 应用主题
         try:
@@ -780,13 +793,14 @@ class StickyNoteManager:
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # 使用 QTextBrowser（不可编辑）+ Markdown CSS 渲染
+        # 使用 QTextBrowser（不可编辑），统一渲染路径与便签 Markdown 预览一致
         help_browser = QTextBrowser()
         help_browser.setOpenExternalLinks(True)
-        css = get_help_css()
+        body_html, css = get_help_content()
+        # 双重保障：setDefaultStyleSheet + 内联 <style>，任一有效即可
         if css:
             help_browser.document().setDefaultStyleSheet(css)
-        help_browser.setHtml(get_full_help_html())
+        help_browser.setHtml(body_html)
         layout.addWidget(help_browser)
 
         btn_layout = QHBoxLayout()
@@ -796,12 +810,23 @@ class StickyNoteManager:
         btn_layout.addStretch()
         close_btn = QPushButton('关闭')
         close_btn.setFixedSize(80, 30)
-        close_btn.clicked.connect(dialog.accept)
+        close_btn.clicked.connect(dialog.close)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
 
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.finished.connect(self._on_help_dialog_closed)
+        self._help_dialog = dialog
+        dialog.show()
+
+    def _on_help_dialog_closed(self, result=None) -> None:
+        """帮助窗口关闭后的清理"""
+        if self._help_dialog is not None:
+            try:
+                self._help_dialog.deleteLater()
+            except Exception:
+                pass
+            self._help_dialog = None
 
     def load_settings(self) -> Dict[str, Any]:
         """加载设置（委托给 ConfigManager）"""

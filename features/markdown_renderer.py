@@ -113,6 +113,8 @@ class MarkdownRenderer:
             browser.setHtml(body_html)
 
         这种方式比 setHtml() 包含 <head><style> 更可靠。
+        如果完整扩展集渲染失败，会自动降级为最小扩展集重试，
+        确保冻结模式（cx_Freeze 打包）下也能正常渲染。
         """
         markdown_text = self._preprocess(markdown_text)
         if not HAS_MARKDOWN:
@@ -125,8 +127,29 @@ class MarkdownRenderer:
             )
             return body_html, self.DOCUMENT_CSS
         except Exception as e:
-            logger.error(f'Markdown 渲染失败: {e}')
-            return f'<pre>{markdown_text}</pre>', self.DOCUMENT_CSS
+            logger.warning(f'Markdown 渲染失败（完整扩展集）: {e}')
+            # 降级：仅使用基础扩展重试
+            try:
+                body_html = markdown.markdown(
+                    markdown_text,
+                    extensions=['tables', 'fenced_code'],
+                    output_format='html5'
+                )
+                logger.info('Markdown 渲染成功（降级扩展集）')
+                return body_html, self.DOCUMENT_CSS
+            except Exception as e2:
+                logger.warning(f'Markdown 渲染失败（降级扩展集）: {e2}')
+                # 最终降级：不使用任何扩展
+                try:
+                    body_html = markdown.markdown(
+                        markdown_text,
+                        output_format='html5'
+                    )
+                    logger.info('Markdown 渲染成功（无扩展）')
+                    return body_html, self.DOCUMENT_CSS
+                except Exception as e3:
+                    logger.error(f'Markdown 渲染完全失败: {e3}')
+                    return f'<pre>{markdown_text}</pre>', self.DOCUMENT_CSS
 
     def render_body_only(self, markdown_text: str) -> str:
         """渲染为纯 body HTML（不含 <html> 和 CSS 包装）"""
@@ -140,8 +163,25 @@ class MarkdownRenderer:
                 output_format='html5'
             )
         except Exception as e:
-            logger.error(f'Markdown 渲染失败: {e}')
-            return f'<pre>{markdown_text}</pre>'
+            logger.warning(f'Markdown 渲染失败（完整扩展集）: {e}')
+            # 降级：仅使用基础扩展重试
+            try:
+                return markdown.markdown(
+                    markdown_text,
+                    extensions=['tables', 'fenced_code'],
+                    output_format='html5'
+                )
+            except Exception as e2:
+                logger.warning(f'Markdown 渲染失败（降级扩展集）: {e2}')
+                # 最终降级：不使用任何扩展
+                try:
+                    return markdown.markdown(
+                        markdown_text,
+                        output_format='html5'
+                    )
+                except Exception as e3:
+                    logger.error(f'Markdown 渲染完全失败: {e3}')
+                    return f'<pre>{markdown_text}</pre>'
 
     @staticmethod
     def is_available() -> bool:

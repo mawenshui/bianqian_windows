@@ -13,8 +13,9 @@ from core import get_project_root, __version__
 
 logger = logging.getLogger(__name__)
 
-# 缓存已渲染的 HTML
+# 缓存已渲染的内容
 _cached_full_html = None
+_cached_full_css = None
 _cached_quick_text = None
 
 
@@ -44,51 +45,77 @@ def _read_readme() -> str:
         return ''
 
 
-def get_full_help_html() -> str:
+def get_help_content() -> tuple:
     """
-    获取完整帮助 HTML（从 readme.md 渲染）。
+    获取帮助页面内容（HTML + CSS），统一使用 render_for_qt() 模式。
 
-    使用 MarkdownRenderer 将 readme.md 转换为 HTML，
-    供 QTextBrowser 通过 setDefaultStyleSheet + setHtml 显示。
+    与便签 Markdown 预览使用完全相同的渲染路径，确保冻结模式（cx_Freeze
+    打包）下行为一致。CSS 同时以 setDefaultStyleSheet 和内联 <style>
+    两种方式提供，任意一种生效即可正常渲染。
 
     Returns:
-        str: 渲染后的 HTML 字符串（body 内容）
+        tuple: (body_html: str, css: str)
+            - body_html: 内联了 CSS 的自包含 HTML（可直接 setHtml）
+            - css: 原始 CSS 字符串（供 setDefaultStyleSheet 使用）
     """
-    global _cached_full_html
-    if _cached_full_html:
-        return _cached_full_html
+    global _cached_full_html, _cached_full_css
+    if _cached_full_html is not None and _cached_full_css is not None:
+        return _cached_full_html, _cached_full_css
 
     md_text = _read_readme()
     if not md_text:
-        _cached_full_html = _fallback_html()
-        return _cached_full_html
+        fallback = _fallback_html()
+        _cached_full_html = fallback
+        _cached_full_css = ''
+        return fallback, ''
 
     try:
         from features.markdown_renderer import MarkdownRenderer
         renderer = MarkdownRenderer()
-        html = renderer.render_body_only(md_text)
-        _cached_full_html = html
-        return html
+        body_html, css = renderer.render_for_qt(md_text)
+        # 将 CSS 内联到 HTML 中，作为 setDefaultStyleSheet 的补充保障
+        if css:
+            inline_html = f'<html><head><style>{css}</style></head><body>{body_html}</body></html>'
+        else:
+            inline_html = body_html
+        _cached_full_html = inline_html
+        _cached_full_css = css
+        logger.debug(f'帮助页面渲染成功 (HAS_MARKDOWN={MarkdownRenderer.is_available()})')
+        return inline_html, css
     except Exception as e:
         logger.warning(f'Markdown 渲染失败: {e}')
-        _cached_full_html = _fallback_html()
-        return _cached_full_html
+        fallback = _fallback_html()
+        _cached_full_html = fallback
+        _cached_full_css = ''
+        return fallback, ''
+
+
+def get_full_help_html() -> str:
+    """
+    获取完整帮助 HTML（从 readme.md 渲染）。
+
+    兼容旧接口：返回内联了 CSS 的自包含 HTML，可直接 setHtml 使用。
+    新代码建议使用 get_help_content() 获取 (html, css) 元组。
+
+    Returns:
+        str: 自包含 HTML 字符串（含内联 <style>）
+    """
+    html, _css = get_help_content()
+    return html
 
 
 def get_help_css() -> str:
     """
     获取 Markdown 渲染用的 CSS 样式表。
 
-    用于 QTextBrowser.document().setDefaultStyleSheet()。
+    兼容旧接口：返回原始 CSS 字符串。
+    新代码建议使用 get_help_content() 获取 (html, css) 元组。
 
     Returns:
         str: CSS 样式表字符串
     """
-    try:
-        from features.markdown_renderer import MarkdownRenderer
-        return MarkdownRenderer.DOCUMENT_CSS
-    except Exception:
-        return ''
+    _html, css = get_help_content()
+    return css
 
 
 def get_quick_help_text() -> str:
@@ -132,8 +159,9 @@ def get_quick_help_text() -> str:
 
 def invalidate_cache():
     """清除缓存，下次调用时重新读取和渲染"""
-    global _cached_full_html, _cached_quick_text
+    global _cached_full_html, _cached_full_css, _cached_quick_text
     _cached_full_html = None
+    _cached_full_css = None
     _cached_quick_text = None
 
 
