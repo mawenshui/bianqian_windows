@@ -31,10 +31,17 @@ from core.note import StickyNote, NoteLoadWorker
 from core.settings import SettingsDialog
 from core import get_project_root, get_styles_dir, get_user_data_dir, __version__
 from core.config import get_config
+from core.ui_preferences import (
+    SETTINGS_TOOL_ORDER_KEY, normalize_settings_tool_order,
+)
 
 logger = logging.getLogger(__name__)
 from features.search import SearchManager
-from features.shortcuts import ShortcutManager
+from features.shortcuts import (
+    ShortcutManager,
+    get_shortcut_definitions,
+    validate_shortcut_map,
+)
 from features.backup import BackupManager
 from features.positioning import get_position_manager
 from features.reminder import ReminderManager
@@ -84,6 +91,7 @@ class StickyNoteManager:
         self.config = get_config()
         self.settings = self.config.get_all()  # 保持向后兼容的快捷访问
         self.settings_file = self.config._settings_file  # 桥接给 feature 模块使用
+        self.sync_engine = None
         
         if 'font' not in self.settings:
             self.config.set('font', {
@@ -91,9 +99,13 @@ class StickyNoteManager:
                 'bold': False, 'italic': False
             })
 
+        # 同步客户端仅做本地配置，不在启动阶段连接网络。
+        self.setup_sync_engine()
+
         # 初始化核心功能模块（启动必需）
         self.search_manager = SearchManager(self)
         self.shortcut_manager = ShortcutManager()
+        self._shortcut_signal_connected = False
         self.backup_manager = BackupManager(self)
         self.position_manager = get_position_manager()
 
@@ -223,29 +235,69 @@ class StickyNoteManager:
 
     # ==================== 全局快捷键 ====================
 
-    def setup_global_shortcuts(self) -> None:
+    def _shortcut_mapping_from_config(self):
+        definitions = get_shortcut_definitions()
+        return {
+            action: self.config.get(f'shortcuts.{action}', spec['default'])
+            for action, spec in definitions.items()
+        }
+
+    def setup_global_shortcuts(self, shortcuts=None):
+        """Register configured global shortcuts and keep one signal connection."""
         try:
-            ok_count = 0
-            fail_count = 0
-            # 默认快捷键
-            default_shortcuts = {
-                'add_note': 'Ctrl+Shift+N',
-                'show_search_dialog': 'Ctrl+Shift+F',
-                'show_backup_dialog': 'Ctrl+Shift+B',
-                'show_group_view': 'Ctrl+Shift+G',
-            }
-            for action, default_combo in default_shortcuts.items():
-                # 从配置读取自定义快捷键
-                combo = self.config.get(f'shortcuts.{action}', default_combo)
-                if self.shortcut_manager.register_global_shortcut(combo, action):
-                    ok_count += 1
-                else:
-                    fail_count += 1
-            self.shortcut_manager.shortcut_activated.connect(self.handle_shortcut_activated)
-            if fail_count >= 2:
-                logger.warning(f'提示: {fail_count}/{ok_count + fail_count} 个全局快捷键未能注册，应用仍可正常使用（通过托盘菜单操作）')
+            mapping = dict(shortcuts or self._shortcut_mapping_from_config())
+            replace = getattr(self.shortcut_manager, 'replace_global_shortcuts', None)
+            if callable(replace):
+                report = replace(mapping)
+            else:
+                registered = {}
+                errors = []
+                for action, combination in mapping.items():
+                    if self.shortcut_manager.register_global_shortcut(combination, action):
+                        registered[action] = combination
+                    else:
+                        errors.append({
+                            'action': action,
+                            'combination': combination,
+                            'reason': 'registration_failed',
+                        })
+                report = {'ok': not errors, 'registered': registered, 'errors': errors}
+            if not getattr(self, '_shortcut_signal_connected', False):
+                self.shortcut_manager.shortcut_activated.connect(self.handle_shortcut_activated)
+                self._shortcut_signal_connected = True
+            if not report.get('ok', False):
+                errors = report.get('errors', [])
+                logger.warning('全局快捷键未完全注册: %s', errors)
+            return report
         except Exception as e:
             logger.error(f'设置全局快捷键中出错: {e}')
+            return {
+                'ok': False,
+                'registered': {},
+                'errors': [{'reason': 'runtime_error', 'error': str(e)}],
+            }
+
+    def apply_shortcut_settings(self, shortcuts):
+        """Validate, register and persist shortcuts without touching other settings."""
+        validation = validate_shortcut_map(shortcuts)
+        if not validation['ok']:
+            return {
+                'ok': False,
+                'registered': {},
+                'errors': list(validation['errors']),
+            }
+        report = self.setup_global_shortcuts(validation['normalized'])
+        if not report.get('ok', False):
+            return report
+        for action, combination in validation['normalized'].items():
+            try:
+                self.config.set(f'shortcuts.{action}', combination, auto_save=False)
+            except TypeError:
+                self.config.set(f'shortcuts.{action}', combination)
+        save = getattr(self.config, 'save', None)
+        if callable(save):
+            save()
+        return report
 
     def show_search_dialog(self) -> None:
         self.search_manager.show_search_dialog()
@@ -618,6 +670,61 @@ class StickyNoteManager:
         except Exception as e:
             QMessageBox.warning(None, '云同步', f'打开同步对话框失败: {e}')
 
+    def setup_sync_engine(self):
+        """Build the configured sync engine without performing network I/O."""
+        previous = getattr(self, 'sync_engine', None)
+        if previous is not None:
+            previous.stop_auto_sync()
+            worker = getattr(previous, '_worker', None)
+            if worker is not None and worker.isRunning():
+                worker.abort()
+        self.sync_engine = None
+
+        if not self.config.get('sync.enabled', False):
+            return None
+
+        try:
+            from features.sync.engine import SyncEngine
+            from features.sync.local_client import LocalSyncClient
+            from features.sync.webdav_client import WebDAVClient
+            from features.secret_storage import reveal_secret
+
+            provider = self.config.get('sync.provider', 'webdav')
+            if provider == 'local':
+                sync_dir = (
+                    self.config.get('sync.local_folder', '')
+                    or self.config.get('sync.local.sync_dir', '')
+                )
+                if not sync_dir:
+                    logger.warning('本地同步已启用，但尚未选择同步目录')
+                    return None
+                client = LocalSyncClient(sync_dir)
+            else:
+                url = self.config.get('sync.webdav.url', '')
+                username = self.config.get('sync.webdav.username', '')
+                protected_password = (
+                    self.config.get('sync.webdav.password_encrypted', '')
+                    or self.config.get('sync.webdav.password', '')
+                )
+                password = reveal_secret(protected_password)
+                remote_path = self.config.get('sync.webdav.remote_path', '/stickynote/')
+                if not all((url, username, password)):
+                    logger.warning('WebDAV 同步已启用，但连接信息不完整')
+                    return None
+                client = WebDAVClient(url, username, password, remote_path)
+
+            engine = SyncEngine(self.notes_dir, self.config)
+            engine.set_client(client)
+            if self.config.get('sync.auto_sync', False):
+                interval = max(1, int(self.config.get('sync.sync_interval_minutes', 30)))
+                engine.start_auto_sync(interval)
+            self.sync_engine = engine
+            return engine
+        except Exception as exc:
+            logger.warning('初始化同步引擎失败: %s', exc)
+            self.sync_engine = None
+            return None
+
     def _refresh_plugin_tray_menu(self) -> None:
         """刷新插件注册的托盘菜单项"""
         # 清除旧的插件动作
@@ -886,6 +993,22 @@ class StickyNoteManager:
     def apply_theme_to_all_notes(self) -> None:
         for note in self.notes.values():
             note.set_theme(self.get_default_theme_css())
+
+    def get_settings_tool_order(self) -> list:
+        """Return the validated left-to-right order for note setting groups."""
+        return normalize_settings_tool_order(
+            self.config.get(SETTINGS_TOOL_ORDER_KEY, None)
+        )
+
+    def set_settings_tool_order(self, order) -> list:
+        """Persist a validated order and preview it on every open note."""
+        normalised = normalize_settings_tool_order(order)
+        self.config.set(SETTINGS_TOOL_ORDER_KEY, normalised)
+        self.settings.setdefault('ui', {})['settings_tool_order'] = list(normalised)
+        for note in self.notes.values():
+            if hasattr(note, 'apply_settings_tool_order'):
+                note.apply_settings_tool_order(normalised)
+        return normalised
 
     def _init_theme_watcher(self) -> None:
         """初始化主题文件热加载监视器"""

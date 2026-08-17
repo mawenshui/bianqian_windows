@@ -15,6 +15,10 @@ tests/test_note.py
 tests/test_p2_features.py
 tests/test_positioning.py
 tests/test_search.py
+tests/test_settings_ui.py
+tests/test_shortcut_settings.py
+tests/test_shortcuts.py
+tests/test_sync_integration.py
 tests/test_tag.py
 tests/test_undo_redo.py
 tests/test_updater.py

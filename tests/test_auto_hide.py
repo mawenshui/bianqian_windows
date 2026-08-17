@@ -7,8 +7,8 @@ import shutil
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from PyQt5.QtCore import QPoint, QRect, Qt, QEvent
-from PyQt5.QtGui import QCursor
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QCursor, QKeyEvent
+from PyQt5.QtWidgets import QApplication, QLabel
 
 
 class TestAutoHideSlideOut(unittest.TestCase):
@@ -322,7 +322,7 @@ class TestHideTabPositioning(unittest.TestCase):
                 # 标签页 x 应等于屏幕左边缘
                 self.assertEqual(tab_pos.x(), mock_screen.left())
                 # 标签页 y 应在便签垂直居中位置附近
-                expected_y = 200 + (300 - 28) // 2
+                expected_y = 200 + (300 - note.HIDE_TAB_HEIGHT) // 2
                 self.assertEqual(tab_pos.y(), expected_y)
 
             note.hide_tab.deleteLater()
@@ -348,9 +348,53 @@ class TestHideTabPositioning(unittest.TestCase):
                 note._position_hide_tab()
                 tab_pos = note.hide_tab.pos()
                 # 标签页右边缘应对齐屏幕右边缘
-                self.assertEqual(tab_pos.x(), mock_screen.right() - 130)
+                self.assertEqual(tab_pos.x(), mock_screen.right() - note.HIDE_TAB_WIDTH)
 
             note.hide_tab.deleteLater()
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_hide_tab_uses_theme_vector_icon_and_keyboard_restore(self):
+        """隐藏把手应使用主题矢量图标，并保留鼠标/键盘恢复入口。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.set_theme('dark_modern.css')
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+
+            icon_label = note.hide_tab.findChild(QLabel, 'hideTabIcon')
+            title_label = note.hide_tab.findChild(QLabel, 'hideTabTitle')
+            self.assertIsNotNone(icon_label)
+            self.assertIsNotNone(title_label)
+            self.assertIsNotNone(icon_label.pixmap())
+            self.assertFalse(icon_label.pixmap().isNull())
+            self.assertEqual(icon_label.text(), '')
+            self.assertEqual(note.hide_tab.focusPolicy(), Qt.StrongFocus)
+            self.assertTrue(note.hide_tab.accessibleName())
+            self.assertTrue(icon_label.testAttribute(Qt.WA_TransparentForMouseEvents))
+            self.assertTrue(title_label.testAttribute(Qt.WA_TransparentForMouseEvents))
+            self.assertIn('QWidget#hideTab:focus', note.hide_tab.styleSheet())
+            self.assertIn(
+                note._current_theme_styles['surface'].lower(),
+                note.hide_tab.styleSheet().lower(),
+            )
+
+            # A theme change while hidden refreshes the existing handle.
+            note.set_theme('high_contrast.css')
+            self.assertIn('#ffff00', note.hide_tab.styleSheet().lower())
+
+            key_event = QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier)
+            with patch.object(note, '_restore_from_auto_hide') as restore:
+                self.assertTrue(note.eventFilter(note.hide_tab, key_event))
+                restore.assert_called_once_with(hover_triggered=False)
+
+            note.hide_tab.deleteLater()
+            note.hide_tab = None
             note.is_deleted = True
             note.close()
         finally:

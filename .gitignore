@@ -17,6 +17,11 @@ window_positions.json
 .benchmarks/
 .pytest_cache/
 .coverage
+test_artifacts_ui_*/
+
+# 本地独立便携版与发布构建（安装资产通过 GitHub Release 发布）
+portable_build_*/
+release_build_*/
 
 # IDE
 .vscode/

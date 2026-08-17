@@ -1,6 +1,6 @@
 # 桌面便签 (StickyNote) — 用户使用手册
 
-> **版本**: v1.7.6 | **平台**: Windows 10/11 | **作者**: MaWenshui
+> **版本**: v1.7.7 | **平台**: Windows 10/11 | **作者**: MaWenshui
 
 一款轻量级 Windows 桌面便签工具，支持富文本编辑、多主题、标签管理、定时提醒、智能格式化、自动备份与在线更新。
 
@@ -34,7 +34,7 @@
 
 ### MSI 安装包安装
 
-1. 下载 `StickyNote-1.7.6-win64.msi`
+1. 下载 `StickyNote-1.7.7-win64.msi`
 2. 双击运行安装向导（中文界面）
 3. 选择安装目录，点击"安装"
 4. 安装完成后可选创建桌面快捷方式
@@ -42,7 +42,7 @@
 
 ### 便携版使用
 
-1. 下载 `StickyNote_v1.7.6_Portable.zip`
+1. 下载 `StickyNote_v1.7.7_Portable.zip`
 2. 解压到任意目录（如 `D:\StickyNote`）
 3. 运行 `StickyNote.exe` 即可
 4. 数据文件保存在 exe 同目录，方便携带
@@ -600,5 +600,5 @@ A: 启动时输入密码界面有「重置」按钮，点击后可清除主密�
 
 ---
 
-*本手册适用于 StickyNote v1.7.6*
+*本手册适用于 StickyNote v1.7.7*
 *项目地址: https://github.com/mawenshui/bianqian_windows*

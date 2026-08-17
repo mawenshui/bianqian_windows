@@ -20,7 +20,7 @@ include_files = [
 build_exe_options = {
     'build_exe': 'dist/StickyNote',
     'packages': [
-        'PyQt5', 'pywintypes', 'win32api', 'win32con', 'win32gui',
+        'PyQt5', 'pywintypes', 'win32api', 'win32con', 'win32gui', 'win32crypt',
         'cryptography', 'argon2', 'markdown', 'pygments',
     ],
     'includes': [
@@ -55,6 +55,12 @@ bdist_msi_options = {
     'launch_on_finish': True,
     # 自定义 MSI 表数据
     'data': {
+        # Windows Installer 的标准桌面目录必须显式出现在 Directory 表中，
+        # 否则下方 DesktopShortcut 组件会在 InstallValidate 阶段报 2727。
+        'Directory': [
+            ('DesktopFolder', 'TARGETDIR', '.'),
+        ],
+
         # --- 桌面快捷方式 Property（默认勾选）---
         'Property': [
             ('DESKTOPSHORTCUT', '1'),
@@ -143,7 +149,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.7.6',
+    version='1.7.7',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={

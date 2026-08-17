@@ -10,19 +10,24 @@ import os
 import json
 import logging
 import re
+import sys
 import time
 import copy
+import ctypes
+import shutil
+import tempfile
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QMessageBox, QCheckBox,
     QColorDialog, QSystemTrayIcon, QMenu, QAction,
     QStackedWidget, QTextBrowser, QTextEdit, QInputDialog, QFileDialog,
-    QListWidget, QDialog, QLineEdit
+    QListWidget, QDialog, QLineEdit, QFrame, QScrollArea, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QPoint, QRect, QMimeData, QTimer, QThread, QSize, QPropertyAnimation, QEasingCurve, QEvent, pyqtSignal
+from PyQt5.QtCore import Qt, QPoint, QRect, QRectF, QPointF, QMimeData, QTimer, QThread, QSize, QPropertyAnimation, QEasingCurve, QEvent, pyqtSignal
 from PyQt5.QtGui import (
-    QFont, QColor, QPalette, QCursor, QPainter, QPen, QTextCharFormat
+    QFont, QColor, QPalette, QCursor, QPainter, QPen, QTextCharFormat,
+    QIcon, QPixmap, QPainterPath, QBrush, QImage, QRegion
 )
 
 from features.undo_redo import UndoRedoLineEdit, UndoRedoTextEdit, UndoRedoManager
@@ -31,6 +36,10 @@ from features.formatter import ContentFormatter
 from features.tag import TagChipWidget
 from features.richtext import RichTextActions
 from core import get_styles_dir, __version__
+from core.ui_preferences import (
+    DEFAULT_SETTINGS_TOOL_ORDER, SETTINGS_TOOL_ORDER_KEY,
+    normalize_settings_tool_order,
+)
 
 # 窗口调整大小检测边界宽度
 RESIZE_MARGIN = 10
@@ -40,6 +49,467 @@ SNAP_THRESHOLD = 15
 
 # 保存防抖延迟 (毫秒)
 SAVE_DEBOUNCE_MS = 500
+
+# Compact desktop toolbar metrics.  Keep a little extra vertical breathing
+# room for the horizontal scrollbar: on Windows the style can reserve more
+# than the nominal 7 px even when the QSS handle is slim.
+TOOL_BUTTON_HEIGHT = 32
+TOOL_PAGE_HEIGHT = 60
+TOOL_PANEL_HEIGHT = 68
+TOOL_CONTENT_MIN_HEIGHT = 44
+
+
+def _shape_refresh_event_types():
+    """Return Qt screen/DPR event enums available in this PyQt build.
+
+    PyQt5 distributions differ: some expose ``ScreenChangeInternal`` and/or
+    ``DevicePixelRatioChange`` while older builds omit one of them.  Looking
+    them up dynamically keeps every ordinary ``changeEvent`` safe.
+    """
+    event_types = []
+    for event_name in ('ScreenChangeInternal', 'DevicePixelRatioChange'):
+        event_type = getattr(QEvent, event_name, None)
+        if event_type is not None:
+            event_types.append(event_type)
+    return tuple(event_types)
+
+
+def _semantic_ui_tokens(is_dark: bool, high_contrast: bool = False) -> dict:
+    """Return the note window's semantic visual tokens.
+
+    Theme files still own the user's note palette.  These tokens only style
+    the editor chrome, so controls remain legible and consistent when a
+    custom theme is selected.  Keeping the semantic layer in Python also
+    avoids scattering per-state colors through QSS strings.
+    """
+    if high_contrast:
+        return {
+            'canvas': '#000000', 'surface': '#111111', 'surface_alt': '#1A1A1A',
+            'text': '#FFFFFF', 'muted': '#FFFFFF', 'border': '#FFFF00',
+            'focus': '#FFFFFF', 'accent': '#FFFF00', 'accent_text': '#000000',
+            'danger': '#FF6B6B', 'danger_border': '#FF6B6B',
+            'selection': '#FFFF00', 'selection_text': '#000000',
+            'radius_control': 5, 'radius_field': 6, 'radius_panel': 6,
+        }
+    if is_dark:
+        return {
+            'canvas': '#171A1F', 'surface': '#222831', 'surface_alt': '#2B323D',
+            'text': '#F3F4F6', 'muted': '#AAB4C2', 'border': '#465160',
+            'focus': '#8AB4F8', 'accent': '#8AB4F8', 'accent_text': '#172033',
+            'danger': '#FCA5A5', 'danger_border': '#B85C62',
+            'selection': '#315A8A', 'selection_text': '#FFFFFF',
+            'radius_control': 6, 'radius_field': 8, 'radius_panel': 8,
+        }
+    return {
+        'canvas': '#F7F8FA', 'surface': '#FFFFFF', 'surface_alt': '#F0F2F5',
+        'text': '#1F2937', 'muted': '#64748B', 'border': '#D7DCE3',
+        'focus': '#2F6FED', 'accent': '#2F6FED', 'accent_text': '#FFFFFF',
+        'danger': '#B42318', 'danger_border': '#E2A5A0',
+        'selection': '#CFE0FF', 'selection_text': '#102A56',
+        'radius_control': 6, 'radius_field': 8, 'radius_panel': 8,
+    }
+
+
+def _rgba_for_hex(value: str, alpha: float) -> str:
+    """Convert a CSS hex color to a Qt-friendly rgba() value."""
+    color = QColor(value)
+    if not color.isValid():
+        color = QColor('#FFFFFF' if alpha >= 0.5 else '#000000')
+    alpha_value = round(max(0.0, min(1.0, alpha)) * 255)
+    return f'rgba({color.red()}, {color.green()}, {color.blue()}, {alpha_value})'
+
+
+def _css_property_color(css: str, selector: str, properties=('background-color', 'background', 'color', 'border')):
+    """Read the first simple hex/rgb color for a selector from a theme CSS."""
+    match = re.search(rf'{re.escape(selector)}\s*\{{([^}}]*)\}}', css, re.I | re.S)
+    if not match:
+        return None
+    block = match.group(1)
+    for prop in properties:
+        # `color` must not match the suffix of `background-color`.
+        prop_match = re.search(
+            rf'(?<![-\w]){re.escape(prop)}\s*:\s*([^;]+)', block, re.I
+        )
+        if prop_match:
+            value = prop_match.group(1).strip()
+            color = QColor(value)
+            if color.isValid():
+                return color.name()
+            hex_match = re.search(r'#[0-9a-fA-F]{3,8}', value)
+            if hex_match:
+                return hex_match.group(0)
+    return None
+
+
+def _normalise_color(value, fallback=''):
+    """Return a stable #rrggbb color or the supplied fallback."""
+    color = QColor(str(value or '').strip())
+    return color.name() if color.isValid() else fallback
+
+
+def _relative_luminance(value) -> float:
+    color = QColor(value)
+    if not color.isValid():
+        return 0.0
+
+    def channel(component):
+        component /= 255.0
+        return component / 12.92 if component <= 0.04045 else ((component + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color.red()) + 0.7152 * channel(color.green()) + 0.0722 * channel(color.blue())
+
+
+def _contrast_ratio(foreground, background) -> float:
+    lighter = max(_relative_luminance(foreground), _relative_luminance(background))
+    darker = min(_relative_luminance(foreground), _relative_luminance(background))
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _mix_colors(first, second, amount: float) -> str:
+    first_color = QColor(first)
+    second_color = QColor(second)
+    if not first_color.isValid():
+        first_color = QColor('#000000')
+    if not second_color.isValid():
+        second_color = QColor('#FFFFFF')
+    amount = max(0.0, min(1.0, amount))
+    return QColor(
+        round(first_color.red() * (1.0 - amount) + second_color.red() * amount),
+        round(first_color.green() * (1.0 - amount) + second_color.green() * amount),
+        round(first_color.blue() * (1.0 - amount) + second_color.blue() * amount),
+    ).name()
+
+
+def _readable_color(preferred, background, minimum=4.5) -> str:
+    """Keep a valid preferred color when readable, otherwise pick black/white."""
+    preferred = _normalise_color(preferred)
+    background = _normalise_color(background, '#FFFFFF')
+    if preferred and _contrast_ratio(preferred, background) >= minimum:
+        return preferred
+    # Exact black/white guarantee the widest possible fallback contrast.  A
+    # near-black fallback can miss 4.5:1 on mid-tone theme surfaces.
+    candidates = ('#000000', '#FFFFFF')
+    return max(candidates, key=lambda candidate: _contrast_ratio(candidate, background))
+
+
+def _contrasting_surface(preferred, background, minimum=3.0) -> str:
+    """Move a themed surface toward black/white until its boundary is visible."""
+    preferred = _normalise_color(preferred, '#808080')
+    background = _normalise_color(background, '#FFFFFF')
+    if _contrast_ratio(preferred, background) >= minimum:
+        return preferred
+    target = max(('#111111', '#FFFFFF'), key=lambda candidate: _contrast_ratio(candidate, background))
+    for step in range(1, 11):
+        candidate = _mix_colors(preferred, target, step / 10.0)
+        if _contrast_ratio(candidate, background) >= minimum:
+            return candidate
+    return target
+
+
+def _has_supported_image_signature(path: str) -> bool:
+    """Reject obviously corrupt files before passing them to Qt image plugins."""
+    try:
+        with open(path, 'rb') as image_file:
+            header = image_file.read(16)
+    except OSError:
+        return False
+    return (
+        header.startswith(b'\x89PNG\r\n\x1a\n') or
+        header.startswith(b'\xff\xd8\xff') or
+        header.startswith((b'GIF87a', b'GIF89a')) or
+        header.startswith(b'BM') or
+        (header.startswith(b'RIFF') and header[8:12] == b'WEBP')
+    )
+
+
+def _make_vector_icon(kind: str, color: str = '#334155', size: int = 20, monochrome: bool = False) -> QIcon:
+    """Create a small, platform-independent action icon.
+
+    The app used emoji glyphs for several actions.  Those glyphs vary wildly
+    between Windows font packs (and can render as empty squares), so the
+    primary action vocabulary is drawn with Qt primitives instead.  The
+    function deliberately has no dependency on an icon font or image file,
+    keeping frozen/portable builds self-contained.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.45, size / 11.0))
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    margin = size * 0.18
+    inner = size - margin * 2
+
+    def draw_glyph(text, rect=None, pixel_size=None, bold=False, italic=False):
+        """Draw a conventional formatting glyph with the Windows UI font."""
+        glyph_font = QFont('Segoe UI')
+        glyph_font.setPixelSize(pixel_size or max(11, round(size * .66)))
+        glyph_font.setBold(bold)
+        glyph_font.setItalic(italic)
+        painter.save()
+        painter.setFont(glyph_font)
+        painter.setPen(QPen(QColor(color)))
+        painter.drawText(rect or QRectF(0, 0, size, size), Qt.AlignCenter, text)
+        painter.restore()
+
+    def draw_letter_a(left=.24, right=.76, top=.20, bottom=.76):
+        middle = (left + right) / 2
+        painter.drawLine(int(size * left), int(size * bottom),
+                         int(size * middle), int(size * top))
+        painter.drawLine(int(size * middle), int(size * top),
+                         int(size * right), int(size * bottom))
+        painter.drawLine(int(size * (left + .10)), int(size * .57),
+                         int(size * (right - .10)), int(size * .57))
+
+    if kind in ('undo', 'redo'):
+        mirror = kind == 'redo'
+        painter.drawArc(int(margin + 1), int(margin + 1), int(inner - 2),
+                        int(inner - 2), 45 * 16 if not mirror else  -225 * 16,
+                        255 * 16)
+        if mirror:
+            painter.drawLine(int(size - margin - 1), int(margin + 3),
+                             int(size - margin - 1), int(margin + 8))
+            painter.drawLine(int(size - margin - 1), int(margin + 3),
+                             int(size - margin - 6), int(margin + 3))
+        else:
+            painter.drawLine(int(margin + 1), int(margin + 3),
+                             int(margin + 1), int(margin + 8))
+            painter.drawLine(int(margin + 1), int(margin + 3),
+                             int(margin + 7), int(margin + 3))
+    elif kind == 'tag':
+        path = QPainterPath()
+        path.moveTo(size * .18, size * .38)
+        path.lineTo(size * .58, size * .18)
+        path.lineTo(size * .84, size * .44)
+        path.lineTo(size * .44, size * .82)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawEllipse(QPointF(size * .56, size * .36), size * .045, size * .045)
+    elif kind == 'bell':
+        painter.drawArc(int(size * .27), int(size * .20), int(size * .46),
+                        int(size * .52), 25 * 16, 130 * 16)
+        painter.drawLine(int(size * .27), int(size * .64), int(size * .73), int(size * .64))
+        painter.drawLine(int(size * .35), int(size * .64), int(size * .31), int(size * .73))
+        painter.drawLine(int(size * .65), int(size * .64), int(size * .69), int(size * .73))
+        painter.drawArc(int(size * .43), int(size * .70), int(size * .14), int(size * .12), 180 * 16, 180 * 16)
+    elif kind in ('lock', 'unlock'):
+        painter.drawRoundedRect(QRectF(size * .25, size * .45, size * .50, size * .36), size * .06, size * .06)
+        if kind == 'lock':
+            painter.drawArc(int(size * .34), int(size * .20), int(size * .32), int(size * .42), 0, 180 * 16)
+        else:
+            painter.drawArc(int(size * .36), int(size * .20), int(size * .32), int(size * .42), 25 * 16, 125 * 16)
+        painter.drawLine(int(size * .50), int(size * .56), int(size * .50), int(size * .68))
+    elif kind == 'link':
+        painter.drawRoundedRect(QRectF(size * .08, size * .34, size * .47, size * .28), size * .13, size * .13)
+        painter.drawRoundedRect(QRectF(size * .45, size * .38, size * .47, size * .28), size * .13, size * .13)
+        painter.drawLine(int(size * .40), int(size * .48), int(size * .60), int(size * .48))
+    elif kind == 'image':
+        painter.drawRoundedRect(QRectF(size * .14, size * .18, size * .72, size * .64), size * .05, size * .05)
+        painter.drawEllipse(QPointF(size * .68, size * .34), size * .06, size * .06)
+        path = QPainterPath()
+        path.moveTo(size * .20, size * .73)
+        path.lineTo(size * .42, size * .50)
+        path.lineTo(size * .57, size * .64)
+        path.lineTo(size * .69, size * .52)
+        path.lineTo(size * .84, size * .73)
+        painter.drawPath(path)
+    elif kind == 'backlink':
+        painter.drawLine(int(size * .23), int(size * .50), int(size * .80), int(size * .50))
+        painter.drawLine(int(size * .23), int(size * .50), int(size * .42), int(size * .31))
+        painter.drawLine(int(size * .23), int(size * .50), int(size * .42), int(size * .69))
+        painter.drawArc(int(size * .39), int(size * .22), int(size * .40), int(size * .56), -80 * 16, 160 * 16)
+    elif kind in ('font_decrease', 'font_increase'):
+        draw_letter_a(.10, .60, .20, .78)
+        painter.drawLine(int(size * .62), int(size * .50), int(size * .88), int(size * .50))
+        if kind == 'font_increase':
+            painter.drawLine(int(size * .75), int(size * .37), int(size * .75), int(size * .63))
+    elif kind in ('bold', 'italic'):
+        if kind == 'bold':
+            path = QPainterPath()
+            path.moveTo(size * .28, size * .18)
+            path.lineTo(size * .28, size * .82)
+            path.moveTo(size * .28, size * .18)
+            path.lineTo(size * .50, size * .18)
+            path.cubicTo(size * .78, size * .18, size * .78, size * .49,
+                         size * .50, size * .49)
+            path.lineTo(size * .28, size * .49)
+            path.moveTo(size * .50, size * .49)
+            path.cubicTo(size * .80, size * .49, size * .80, size * .82,
+                         size * .50, size * .82)
+            path.lineTo(size * .28, size * .82)
+            painter.drawPath(path)
+        else:
+            painter.drawLine(int(size * .44), int(size * .20), int(size * .72), int(size * .20))
+            painter.drawLine(int(size * .28), int(size * .80), int(size * .56), int(size * .80))
+            painter.drawLine(int(size * .62), int(size * .20), int(size * .38), int(size * .80))
+    elif kind in ('font_color', 'underline', 'strike'):
+        if kind == 'font_color':
+            draw_letter_a(.25, .75, .16, .68)
+        elif kind == 'underline':
+            underline_path = QPainterPath()
+            underline_path.moveTo(size * .28, size * .20)
+            underline_path.lineTo(size * .28, size * .50)
+            underline_path.cubicTo(size * .28, size * .70, size * .72, size * .70,
+                                   size * .72, size * .50)
+            underline_path.lineTo(size * .72, size * .20)
+            painter.drawPath(underline_path)
+            painter.drawLine(int(size * .22), int(size * .78), int(size * .78), int(size * .78))
+        else:
+            strike_path = QPainterPath()
+            strike_path.moveTo(size * .70, size * .24)
+            strike_path.cubicTo(size * .55, size * .13, size * .28, size * .18,
+                                size * .30, size * .36)
+            strike_path.cubicTo(size * .32, size * .50, size * .68, size * .45,
+                                size * .70, size * .63)
+            strike_path.cubicTo(size * .72, size * .80, size * .43, size * .87,
+                                size * .27, size * .74)
+            painter.drawPath(strike_path)
+            painter.drawLine(int(size * .20), int(size * .52), int(size * .80), int(size * .52))
+        if kind == 'font_color':
+            accent = color if monochrome else '#EF4444'
+            painter.setPen(QPen(QColor(accent), max(2.0, size / 7.0), Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(int(size * .24), int(size * .78), int(size * .76), int(size * .78))
+    elif kind in ('superscript', 'subscript'):
+        painter.drawLine(int(size * .16), int(size * .34), int(size * .50), int(size * .72))
+        painter.drawLine(int(size * .50), int(size * .34), int(size * .16), int(size * .72))
+        top = .08 if kind == 'superscript' else .57
+        two_path = QPainterPath()
+        two_path.moveTo(size * .59, size * (top + .10))
+        two_path.cubicTo(size * .67, size * top, size * .84, size * top,
+                         size * .84, size * (top + .10))
+        two_path.lineTo(size * .60, size * (top + .28))
+        two_path.lineTo(size * .85, size * (top + .28))
+        painter.drawPath(two_path)
+    elif kind in ('align_left', 'align_center', 'align_right'):
+        lengths = (0.62, 0.82, 0.54)
+        for index, fraction in enumerate(lengths):
+            y = size * (0.28 + index * .22)
+            width = size * fraction
+            if kind == 'align_left':
+                x = size * .18
+            elif kind == 'align_right':
+                x = size * (.82 - fraction)
+            else:
+                x = size * (.50 - fraction / 2)
+            painter.drawLine(int(x), int(y), int(x + width), int(y))
+    elif kind in ('ordered_list', 'unordered_list'):
+        for index in range(3):
+            y = size * (0.28 + index * .22)
+            if kind == 'unordered_list':
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(color))
+                painter.drawEllipse(QPointF(size * .25, y), size * .045, size * .045)
+            else:
+                draw_glyph(
+                    str(index + 1),
+                    QRectF(size * .10, y - size * .11, size * .25, size * .22),
+                    max(7, round(size * .30)), bold=True,
+                )
+            painter.setPen(pen)
+            painter.drawLine(int(size * .42), int(y), int(size * .82), int(y))
+    elif kind == 'highlight':
+        painter.drawLine(int(size * .27), int(size * .73), int(size * .74), int(size * .26))
+        painter.drawLine(int(size * .20), int(size * .80), int(size * .46), int(size * .74))
+        painter.drawLine(int(size * .54), int(size * .25), int(size * .75), int(size * .46))
+        accent = color if monochrome else '#FBBF24'
+        painter.setPen(QPen(QColor(accent), max(2.0, size / 7.0), Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(int(size * .29), int(size * .69), int(size * .63), int(size * .35))
+    elif kind == 'clear':
+        painter.drawLine(int(size * .28), int(size * .28), int(size * .72), int(size * .72))
+        painter.drawLine(int(size * .72), int(size * .28), int(size * .28), int(size * .72))
+    elif kind == 'trash':
+        painter.drawRoundedRect(QRectF(size * .25, size * .28, size * .50, size * .57), size * .04, size * .04)
+        painter.drawLine(int(size * .20), int(size * .24), int(size * .80), int(size * .24))
+        painter.drawLine(int(size * .40), int(size * .17), int(size * .60), int(size * .17))
+        painter.drawLine(int(size * .42), int(size * .40), int(size * .42), int(size * .72))
+        painter.drawLine(int(size * .58), int(size * .40), int(size * .58), int(size * .72))
+    elif kind == 'hide':
+        painter.drawEllipse(QRectF(size * .17, size * .31, size * .66, size * .38))
+        painter.drawEllipse(QPointF(size * .50, size * .50), size * .08, size * .08)
+        painter.drawLine(int(size * .20), int(size * .20), int(size * .80), int(size * .80))
+    elif kind == 'help':
+        painter.drawEllipse(QRectF(size * .18, size * .18, size * .64, size * .64))
+        painter.drawArc(int(size * .38), int(size * .30), int(size * .24), int(size * .22), 25 * 16, 220 * 16)
+        painter.drawLine(int(size * .50), int(size * .52), int(size * .50), int(size * .61))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(QPointF(size * .50, size * .70), size * .045, size * .045)
+    elif kind == 'markdown':
+        # Hash + two text lines is a compact Markdown cue without relying on
+        # a platform font containing a special glyph.
+        painter.drawLine(int(size * .22), int(size * .32), int(size * .42), int(size * .32))
+        painter.drawLine(int(size * .22), int(size * .46), int(size * .42), int(size * .46))
+        painter.drawLine(int(size * .27), int(size * .23), int(size * .27), int(size * .55))
+        painter.drawLine(int(size * .37), int(size * .23), int(size * .37), int(size * .55))
+        painter.drawLine(int(size * .54), int(size * .30), int(size * .78), int(size * .30))
+        painter.drawLine(int(size * .54), int(size * .47), int(size * .78), int(size * .47))
+        painter.drawLine(int(size * .54), int(size * .64), int(size * .70), int(size * .64))
+    elif kind == 'tool_format':
+        painter.drawLine(int(size * .22), int(size * .72), int(size * .50), int(size * .28))
+        painter.drawLine(int(size * .50), int(size * .28), int(size * .76), int(size * .72))
+        painter.drawLine(int(size * .34), int(size * .54), int(size * .64), int(size * .54))
+    elif kind == 'tool_settings':
+        for y, knob_x in ((.30, .62), (.50, .38), (.70, .57)):
+            painter.drawLine(int(size * .20), int(size * y), int(size * .80), int(size * y))
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(QPointF(size * knob_x, size * y), size * .055, size * .055)
+            painter.setBrush(Qt.NoBrush)
+    elif kind == 'tool_actions':
+        # A four-cell toolbox grid communicates "all note actions" more
+        # clearly than the legacy ellipsis/menu glyph.
+        for x in (.24, .54):
+            for y in (.24, .54):
+                painter.drawRoundedRect(
+                    QRectF(size * x, size * y, size * .22, size * .22),
+                    size * .035, size * .035,
+                )
+    elif kind in ('edge_left', 'edge_right', 'edge_up', 'edge_down'):
+        points = {
+            'edge_left': ((.64, .25), (.36, .50), (.64, .75)),
+            'edge_right': ((.36, .25), (.64, .50), (.36, .75)),
+            'edge_up': ((.25, .64), (.50, .36), (.75, .64)),
+            'edge_down': ((.25, .36), (.50, .64), (.75, .36)),
+        }[kind]
+        first, middle, last = points
+        painter.drawLine(
+            int(size * first[0]), int(size * first[1]),
+            int(size * middle[0]), int(size * middle[1]),
+        )
+        painter.drawLine(
+            int(size * middle[0]), int(size * middle[1]),
+            int(size * last[0]), int(size * last[1]),
+        )
+        if kind in ('edge_left', 'edge_right'):
+            rail_x = .80 if kind == 'edge_left' else .20
+            painter.drawLine(
+                int(size * rail_x), int(size * .27),
+                int(size * rail_x), int(size * .73),
+            )
+        else:
+            rail_y = .80 if kind == 'edge_up' else .20
+            painter.drawLine(
+                int(size * .27), int(size * rail_y),
+                int(size * .73), int(size * rail_y),
+            )
+    elif kind == 'background':
+        painter.drawRect(QRectF(size * .16, size * .22, size * .68, size * .56))
+        painter.drawEllipse(QPointF(size * .67, size * .38), size * .07, size * .07)
+        path = QPainterPath()
+        path.moveTo(size * .21, size * .70)
+        path.lineTo(size * .42, size * .48)
+        path.lineTo(size * .56, size * .62)
+        path.lineTo(size * .70, size * .50)
+        path.lineTo(size * .80, size * .70)
+        painter.drawPath(path)
+    elif kind == 'clear_background':
+        painter.drawRect(QRectF(size * .18, size * .22, size * .64, size * .56))
+        painter.drawLine(int(size * .22), int(size * .24), int(size * .78), int(size * .76))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class NoteSaveWorker(QThread):
@@ -152,6 +622,11 @@ class StickyNote(QWidget):
     主题切换、字体设置、透明度调节和防抖异步保存。
     """
 
+    # Keep the visual radius in one place.  The same logical radius is used
+    # by the antialiased painter and the native hit-test mask below.
+    WINDOW_CORNER_RADIUS = 14
+    WINDOW_BORDER_WIDTH = 2
+
     def __init__(self, note_id, notes_dir='notes', manager=None, theme_css="soft_yellow.css", preloaded_data=None):
         super().__init__()
         self.note_id = note_id
@@ -168,6 +643,41 @@ class StickyNote(QWidget):
         self.note_data = self.load_note(preloaded_data)
 
         self.theme = self.note_data.get('theme', theme_css)
+        self.background_image = self.note_data.get('background_image', '') or ''
+        raw_font_color = self.note_data.get('font_color')
+        normalised_font_color = _normalise_color(raw_font_color)
+        self.font_color = normalised_font_color or '#000000'
+        stored_font_mode = str(self.note_data.get('font_color_mode', '')).lower()
+        if stored_font_mode == 'manual' and not normalised_font_color:
+            # Corrupt/manual data must not force an unreadable black fallback
+            # on a dark theme. Keep the note usable and return to theme mode.
+            stored_font_mode = 'theme'
+        if stored_font_mode not in {'theme', 'manual'}:
+            # Legacy notes always stored black, even when the user never chose
+            # it. Preserve non-black choices; migrate the legacy default to
+            # theme-driven text.
+            stored_font_mode = 'manual' if self.font_color != '#000000' else 'theme'
+        self.font_color_mode = stored_font_mode
+        self.background_text_color = _normalise_color(
+            self.note_data.get('background_text_color')
+        )
+        self.background_control_color = _normalise_color(
+            self.note_data.get('background_control_color')
+        )
+        try:
+            stored_control_opacity = float(self.note_data.get('control_opacity', 1.0))
+        except (TypeError, ValueError):
+            stored_control_opacity = 1.0
+        self.control_opacity = max(0.2, min(1.0, stored_control_opacity))
+        self._background_pixmap = QPixmap()
+        self._background_source = ''
+        self._background_invalid = False
+
+        # A frameless top-level QWidget is rectangular until an explicit
+        # native mask is applied. Keep shape state separate from the paint
+        # cache so it can be rebuilt after resize/DPI changes.
+        self._window_shape_ready = False
+        self._window_shape_dpr = 1.0
 
         self.dragging = False
         self.resizing = False
@@ -197,7 +707,7 @@ class StickyNote(QWidget):
 
         # paintEvent 渲染缓存
         self._border_pen = QPen(QColor(200, 200, 200))
-        self._border_pen.setWidth(2)
+        self._border_pen.setWidth(self.WINDOW_BORDER_WIDTH)
 
         # 屏幕几何缓存
         self._screen_geo_cache = None
@@ -212,20 +722,36 @@ class StickyNote(QWidget):
             flags |= Qt.WindowStaysOnTopHint
         flags |= Qt.Tool
         self.setWindowFlags(flags)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setAttribute(Qt.WA_NoSystemBackground, False)
+        # The native top-level window remains rectangular unless Qt is
+        # allowed to composite transparent pixels.  The rounded painter and
+        # QRegion mask below provide the visible and hit-test boundaries.
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setAutoFillBackground(False)
+        self.setMinimumSize(240, 240)
+        self._load_background_pixmap()
 
         # 启用鼠标追踪，以便悬停在边缘时自动切换为缩放光标
         self.setMouseTracking(True)
 
         # 主布局
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN)
+        # Keep a little breathing room around each control while preserving the
+        # existing frameless-window resize hit area.
+        main_layout.setContentsMargins(RESIZE_MARGIN + 2, RESIZE_MARGIN + 2,
+                                       RESIZE_MARGIN + 2, RESIZE_MARGIN + 2)
+        main_layout.setSpacing(8)
 
         # 标题编辑
         self.title_edit = PlainLineEdit()
-        self.title_edit.setFixedHeight(40)
+        self.title_edit.setObjectName('noteTitle')
+        self.title_edit.setMinimumHeight(42)
+        self.title_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.title_edit.setPlaceholderText('便签标题')
+        self.title_edit.setAccessibleName('便签标题')
         self.title_edit.setText(self.note_data.get('title', f'\u4fbf\u7b7e {self.note_id}'))
         self.title_edit.textChanged.connect(self.update_title)
         self.title_edit.setMaxLength(50)
@@ -247,6 +773,9 @@ class StickyNote(QWidget):
 
         # 编辑器栈（富文本编辑 / Markdown 预览）
         self.editor_stack = QStackedWidget()
+        self.editor_stack.setObjectName('editorStack')
+        self.editor_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.editor_stack.setAccessibleName('便签编辑区')
         self.editor_stack.addWidget(self.text_edit)  # page 0: 富文本编辑器
         self.md_preview = QTextBrowser()
         self.md_preview.setOpenExternalLinks(True)
@@ -268,8 +797,8 @@ class StickyNote(QWidget):
 
         # 字体大小调整按钮布局
         font_layout = QHBoxLayout()
-        font_layout.setContentsMargins(0, 0, 0, 0)
-        font_layout.setSpacing(5)
+        font_layout.setContentsMargins(4, 3, 4, 3)
+        font_layout.setSpacing(8)
 
         self.decrease_font_btn = QPushButton('A-')
         self.decrease_font_btn.setFixedSize(40, 30)
@@ -400,38 +929,194 @@ class StickyNote(QWidget):
         self.clear_highlight_btn.clicked.connect(self.rich_text.clear_highlight)
         font_layout.addWidget(self.clear_highlight_btn)
 
-        font_layout.addStretch()
-        main_layout.addLayout(font_layout)
+        # Recompose the same controls into bounded semantic groups. Keeping
+        # the existing button instances preserves every signal and state.
+        while font_layout.count():
+            font_layout.takeAt(0)
+        for separator in (
+                self.separator1, self.separator2, self.separator3,
+                self.separator4, self.separator5, self.separator6,
+                self.separator7):
+            separator.setParent(self)
+            separator.hide()
+        format_group_specs = (
+            ('formatTypeScaleGroup', '字体大小',
+             (self.decrease_font_btn, self.increase_font_btn)),
+            ('formatEmphasisGroup', '字体强调',
+             (self.bold_btn, self.italic_btn)),
+            ('formatColorGroup', '字体颜色', (self.color_btn,)),
+            ('formatDecorationGroup', '下划线和删除线',
+             (self.underline_btn, self.strikethrough_btn)),
+            ('formatScriptGroup', '上标和下标',
+             (self.superscript_btn, self.subscript_btn)),
+            ('formatAlignmentGroup', '文本对齐',
+             (self.align_left_btn, self.align_center_btn, self.align_right_btn)),
+            ('formatListGroup', '列表',
+             (self.ordered_list_btn, self.unordered_list_btn)),
+            ('formatHighlightGroup', '高亮',
+             (self.highlight_btn, self.clear_highlight_btn)),
+        )
+        self.format_tool_groups = []
+        for object_name, accessible_name, controls in format_group_specs:
+            for control in controls:
+                control.setFixedSize(34, TOOL_BUTTON_HEIGHT)
+            group = self._make_tool_group(object_name, accessible_name, controls)
+            self.format_tool_groups.append(group)
+            font_layout.addWidget(group)
 
-        # 工具栏
-        toolbar = QHBoxLayout()
+        # The formatting strip contains more actions than a compact note can
+        # display at once.  A horizontal scroller keeps every action available
+        # on narrow windows instead of letting buttons overlap or disappear.
+        format_panel = QWidget()
+        format_panel.setObjectName('formatPanel')
+        format_panel.setAttribute(Qt.WA_StyledBackground, True)
+        format_panel.setLayout(font_layout)
+        format_panel.setMinimumHeight(TOOL_CONTENT_MIN_HEIGHT)
+        format_panel.adjustSize()
+        self.format_panel = format_panel
+        self.format_scroll = QScrollArea()
+        self.format_scroll.setObjectName('formatScroll')
+        self.format_scroll.setWidget(format_panel)
+        self.format_scroll.setWidgetResizable(False)
+        self.format_scroll.setFrameShape(QFrame.NoFrame)
+        self.format_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.format_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.format_scroll.setFixedHeight(TOOL_PAGE_HEIGHT)
+        self.format_scroll.setMinimumWidth(0)
+        self.format_scroll.setMinimumSize(0, TOOL_PAGE_HEIGHT)
+        self.format_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # 选项轨道。它与格式、操作轨道共享一行空间，避免窄窗口中
+        # 固定宽度的透明度滑块挤掉功能按钮。
+        settings_layout = QHBoxLayout()
+        settings_layout.setContentsMargins(4, 3, 4, 3)
+        settings_layout.setSpacing(8)
 
         self.transparency_slider = QSlider(Qt.Horizontal)
         self.transparency_slider.setRange(20, 100)
         self.transparency_slider.setValue(int(self.note_data.get('opacity', 0.9) * 100))
         self.transparency_slider.setSingleStep(1)
-        self.transparency_slider.setFixedWidth(200)
+        self.transparency_slider.setFixedWidth(112)
         self.transparency_slider.valueChanged.connect(self.change_transparency)
         self.transparency_label = QLabel('\u900f\u660e\u5ea6:')
-        toolbar.addWidget(self.transparency_label)
-        toolbar.addWidget(self.transparency_slider)
+        settings_layout.addWidget(self.transparency_label)
+        settings_layout.addWidget(self.transparency_slider)
+
+        self.control_opacity_slider = QSlider(Qt.Horizontal)
+        self.control_opacity_slider.setObjectName('controlOpacitySlider')
+        self.control_opacity_slider.setRange(20, 100)
+        self.control_opacity_slider.setValue(int(self.control_opacity * 100))
+        self.control_opacity_slider.setSingleStep(1)
+        self.control_opacity_slider.setFixedWidth(112)
+        self.control_opacity_slider.setAccessibleName('控件透明度')
+        self.control_opacity_slider.valueChanged.connect(self.change_control_opacity)
+        self.control_opacity_label = QLabel(f'控件透明度: {int(self.control_opacity * 100)}%')
+        settings_layout.addWidget(self.control_opacity_label)
+        settings_layout.addWidget(self.control_opacity_slider)
+
+        self.background_btn = QPushButton('背景图')
+        self.background_btn.setObjectName('backgroundButton')
+        self.background_btn.setToolTip('为当前便签选择背景图片')
+        self.background_btn.setAccessibleName('选择便签背景图片')
+        self.background_btn.setFixedSize(96, 30)
+        self.background_btn.clicked.connect(self.choose_background_image)
+        settings_layout.addWidget(self.background_btn)
+
+        self.clear_background_btn = QPushButton('清除背景')
+        self.clear_background_btn.setObjectName('clearBackgroundButton')
+        self.clear_background_btn.setToolTip('清除当前便签背景图片，恢复主题颜色')
+        self.clear_background_btn.setAccessibleName('清除便签背景图片')
+        self.clear_background_btn.setFixedSize(108, 30)
+        self.clear_background_btn.clicked.connect(self.clear_background_image)
+        settings_layout.addWidget(self.clear_background_btn)
+
+        self.background_text_color_btn = QPushButton('文字色')
+        self.background_text_color_btn.setObjectName('backgroundTextColorButton')
+        self.background_text_color_btn.setToolTip(
+            '设置图片背景下的默认文字色；已手动着色文字不受影响'
+        )
+        self.background_text_color_btn.setFixedSize(90, 30)
+        self.background_text_color_btn.clicked.connect(self.choose_background_text_color)
+        settings_layout.addWidget(self.background_text_color_btn)
+
+        self.background_control_color_btn = QPushButton('控件色')
+        self.background_control_color_btn.setObjectName('backgroundControlColorButton')
+        self.background_control_color_btn.setToolTip('设置图片背景下的按钮、图标和焦点色')
+        self.background_control_color_btn.setFixedSize(90, 30)
+        self.background_control_color_btn.clicked.connect(self.choose_background_control_color)
+        settings_layout.addWidget(self.background_control_color_btn)
+
+        self.reset_background_colors_btn = QPushButton('颜色自动')
+        self.reset_background_colors_btn.setObjectName('resetBackgroundColorsButton')
+        self.reset_background_colors_btn.setToolTip('恢复根据背景图和主题自动选择的高对比颜色')
+        self.reset_background_colors_btn.setFixedSize(104, 30)
+        self.reset_background_colors_btn.clicked.connect(self.reset_background_colors)
+        settings_layout.addWidget(self.reset_background_colors_btn)
 
         self.topmost_checkbox = QCheckBox("\u603b\u5728\u6700\u524d")
         self.topmost_checkbox.setChecked(self.note_data.get('always_on_top', True))
         self.topmost_checkbox.stateChanged.connect(self.toggle_always_on_top)
-        toolbar.addWidget(self.topmost_checkbox)
+        settings_layout.addWidget(self.topmost_checkbox)
 
         self.format_checkbox = QCheckBox("\u667a\u80fd\u683c\u5f0f\u5316")
         self.format_checkbox.setChecked(self.note_data.get('auto_format_enabled', True))
         self.format_checkbox.setToolTip('\u542f\u7528\u540e\u7c98\u8d34\u65f6\u81ea\u52a8\u683c\u5f0f\u5316')
         self.format_checkbox.stateChanged.connect(self.toggle_auto_format)
-        toolbar.addWidget(self.format_checkbox)
+        settings_layout.addWidget(self.format_checkbox)
 
-        toolbar.addStretch()
+        # Background, opacity and behaviour are separate regions rather than
+        # one uninterrupted row.  The controls and connections stay intact.
+        while settings_layout.count():
+            settings_layout.takeAt(0)
+        for button in (
+                self.background_btn, self.clear_background_btn,
+                self.background_text_color_btn, self.background_control_color_btn,
+                self.reset_background_colors_btn):
+            button.setFixedHeight(TOOL_BUTTON_HEIGHT)
+        settings_group_specs = (
+            ('background', 'settingsBackgroundGroup', '背景图片',
+             (self.background_btn, self.clear_background_btn)),
+            ('background_colors', 'settingsColorGroup', '背景文字和控件颜色',
+             (self.background_text_color_btn, self.background_control_color_btn,
+              self.reset_background_colors_btn)),
+            ('control_opacity', 'settingsControlOpacityGroup', '控件透明度',
+             (self.control_opacity_label, self.control_opacity_slider)),
+            ('window_opacity', 'settingsWindowOpacityGroup', '便签透明度',
+             (self.transparency_label, self.transparency_slider)),
+            ('behaviour', 'settingsBehaviourGroup', '便签行为',
+             (self.topmost_checkbox, self.format_checkbox)),
+        )
+        self.settings_tool_groups = []
+        self.settings_tool_group_map = {}
+        self.settings_layout = settings_layout
+        for key, object_name, accessible_name, controls in settings_group_specs:
+            group = self._make_tool_group(object_name, accessible_name, controls)
+            self.settings_tool_groups.append(group)
+            self.settings_tool_group_map[key] = group
+        self.apply_settings_tool_order(self._configured_settings_tool_order())
+
+        settings_panel = QWidget()
+        settings_panel.setObjectName('settingsPanel')
+        settings_panel.setLayout(settings_layout)
+        settings_panel.setMinimumHeight(TOOL_CONTENT_MIN_HEIGHT)
+        settings_panel.setAttribute(Qt.WA_StyledBackground, True)
+        settings_panel.adjustSize()
+        self.settings_panel = settings_panel
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setObjectName('settingsScroll')
+        self.settings_scroll.setWidget(settings_panel)
+        self.settings_scroll.setWidgetResizable(False)
+        self.settings_scroll.setFrameShape(QFrame.NoFrame)
+        self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.settings_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.settings_scroll.setFixedHeight(TOOL_PAGE_HEIGHT)
+        self.settings_scroll.setMinimumSize(0, TOOL_PAGE_HEIGHT)
+        self.settings_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         # 按钮布局
         buttons_layout = QHBoxLayout()
-        buttons_layout.setSpacing(10)
+        buttons_layout.setContentsMargins(4, 3, 4, 3)
+        buttons_layout.setSpacing(8)
         
         # 撤销/重做按钮
         self.undo_btn = QPushButton('↩')
@@ -457,6 +1142,7 @@ class StickyNote(QWidget):
         
         # 提醒按钮
         self.reminder_btn = QPushButton('⏰')
+        self.reminder_btn.setObjectName('reminderButton')
         self.reminder_btn.setToolTip('设置提醒')
         self.reminder_btn.setFixedSize(36, 30)
         self.reminder_btn.clicked.connect(self.open_reminder_dialog)
@@ -464,6 +1150,7 @@ class StickyNote(QWidget):
         
         # 锁定/解锁按钮
         self.lock_btn = QPushButton('🔒' if self.is_locked else '🔓')
+        self.lock_btn.setObjectName('lockButton')
         self.lock_btn.setToolTip('锁定便签' if not self.is_locked else '解锁便签')
         self.lock_btn.setFixedSize(36, 30)
         self.lock_btn.clicked.connect(self._toggle_lock)
@@ -485,6 +1172,7 @@ class StickyNote(QWidget):
         
         # Markdown 预览切换
         self.md_toggle_btn = QPushButton('MD')
+        self.md_toggle_btn.setObjectName('markdownButton')
         self.md_toggle_btn.setToolTip('切换 Markdown 预览')
         self.md_toggle_btn.setFixedSize(36, 30)
         self.md_toggle_btn.setCheckable(True)
@@ -499,6 +1187,7 @@ class StickyNote(QWidget):
         buttons_layout.addWidget(self.backlink_btn)
         
         self.delete_btn = QPushButton('删除')
+        self.delete_btn.setObjectName('deleteButton')
         self.delete_btn.setToolTip('\u5220\u9664\u4fbf\u7b7e')
         self.delete_btn.setFixedSize(60, 30)
         self.delete_btn.clicked.connect(self.delete_note)
@@ -517,8 +1206,102 @@ class StickyNote(QWidget):
         self.hide_btn.clicked.connect(self.hide_note)
         buttons_layout.addWidget(self.hide_btn)
 
-        toolbar.addLayout(buttons_layout)
-        main_layout.addLayout(toolbar)
+        while buttons_layout.count():
+            buttons_layout.takeAt(0)
+        for button in (
+                self.undo_btn, self.redo_btn, self.tag_btn, self.reminder_btn,
+                self.lock_btn, self.link_btn, self.image_btn, self.md_toggle_btn,
+                self.backlink_btn, self.help_btn):
+            button.setFixedSize(36, TOOL_BUTTON_HEIGHT)
+        self.hide_btn.setFixedSize(76, TOOL_BUTTON_HEIGHT)
+        self.delete_btn.setFixedSize(76, TOOL_BUTTON_HEIGHT)
+        action_group_specs = (
+            ('actionHistoryGroup', '撤销和重做',
+             (self.undo_btn, self.redo_btn)),
+            ('actionOrganiseGroup', '标签、提醒和锁定',
+             (self.tag_btn, self.reminder_btn, self.lock_btn)),
+            ('actionInsertGroup', '插入和关联内容',
+             (self.link_btn, self.image_btn, self.md_toggle_btn, self.backlink_btn)),
+            ('actionWindowGroup', '帮助和窗口显示',
+             (self.help_btn, self.hide_btn)),
+            ('actionDangerGroup', '删除便签', (self.delete_btn,)),
+        )
+        self.action_tool_groups = []
+        for object_name, accessible_name, controls in action_group_specs:
+            group = self._make_tool_group(object_name, accessible_name, controls)
+            self.action_tool_groups.append(group)
+            buttons_layout.addWidget(group)
+
+        action_panel = QWidget()
+        action_panel.setObjectName('actionPanel')
+        action_panel.setLayout(buttons_layout)
+        action_panel.setMinimumHeight(TOOL_CONTENT_MIN_HEIGHT)
+        action_panel.setAttribute(Qt.WA_StyledBackground, True)
+        action_panel.adjustSize()
+        self.action_panel = action_panel
+        self.action_scroll = QScrollArea()
+        self.action_scroll.setObjectName('actionScroll')
+        self.action_scroll.setWidget(action_panel)
+        self.action_scroll.setWidgetResizable(False)
+        self.action_scroll.setFrameShape(QFrame.NoFrame)
+        self.action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.action_scroll.setFixedHeight(TOOL_PAGE_HEIGHT)
+        self.action_scroll.setMinimumWidth(0)
+        self.action_scroll.setMinimumSize(0, TOOL_PAGE_HEIGHT)
+        self.action_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Signature tool rail: one compact row, three clearly named views.
+        # This changes presentation only; every original control object and
+        # signal remains intact inside its corresponding scrollable page.
+        self.control_panel = QFrame()
+        self.control_panel.setObjectName('controlPanel')
+        tool_rail_layout = QHBoxLayout()
+        tool_rail_layout.setContentsMargins(4, 4, 4, 4)
+        tool_rail_layout.setSpacing(8)
+        self.tool_rail_buttons = []
+        for icon_kind, description in (
+                ('tool_format', '显示文字格式工具'),
+                ('tool_settings', '显示便签选项'),
+                ('tool_actions', '显示便签功能')):
+            button = QPushButton('')
+            button.setCheckable(True)
+            button.setFixedSize(36, 36)
+            button.setProperty('toolRailIcon', icon_kind)
+            button.setToolTip(description)
+            button.setAccessibleName(description)
+            button.setProperty('toolRailTab', True)
+            self.tool_rail_buttons.append(button)
+        self.tool_rail_nav = self._make_tool_group(
+            'toolRailNav', '底部工具页切换', self.tool_rail_buttons
+        )
+        self.tool_rail_nav.setProperty('toolNavigation', True)
+        self.tool_rail_nav.setFixedHeight(42)
+        tool_rail_layout.addWidget(self.tool_rail_nav)
+        self.tool_rail_stack = QStackedWidget()
+        self.tool_rail_stack.setObjectName('toolRailStack')
+        # The pages are independently horizontally scrollable.  Ignoring the
+        # stack's content size hint lets the nav rail keep its own fixed width
+        # instead of forcing the page to compress into the nav buttons.
+        self.tool_rail_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.tool_rail_stack.setMinimumWidth(0)
+        self.tool_rail_stack.setFixedHeight(TOOL_PAGE_HEIGHT)
+        self.tool_rail_stack.addWidget(self.format_scroll)
+        self.tool_rail_stack.addWidget(self.settings_scroll)
+        self.tool_rail_stack.addWidget(self.action_scroll)
+        for index, button in enumerate(self.tool_rail_buttons):
+            button.clicked.connect(lambda checked=False, page=index: self._show_tool_rail(page))
+        tool_rail_layout.addWidget(self.tool_rail_stack, 1)
+        self.control_panel.setLayout(tool_rail_layout)
+        self.control_panel.setMinimumHeight(TOOL_PANEL_HEIGHT)
+        self.control_panel.setAttribute(Qt.WA_StyledBackground, True)
+        main_layout.addWidget(self.control_panel)
+        self._show_tool_rail(2)
+
+        # Install a deterministic vector icon vocabulary after all buttons have
+        # been created.  Text labels remain in tooltips and accessible names,
+        # while icons stay crisp on every Windows font configuration.
+        self._prepare_action_icons()
 
         # 标签芯片显示区（版本号固定左下角，标签在其右侧排列）
         self.tags_layout = QHBoxLayout()
@@ -537,6 +1320,10 @@ class StickyNote(QWidget):
         main_layout.addLayout(self.tags_layout)
 
         self.setLayout(main_layout)
+        # Tab order must be configured after every nested page has a common
+        # top-level window; doing it earlier triggers Qt warnings for controls
+        # hosted by the stacked tool rail.
+        self._configure_accessibility()
 
         self.apply_theme()
 
@@ -557,26 +1344,20 @@ class StickyNote(QWidget):
             self.bold_btn.setChecked(self.font_settings.get('bold', False))
             self.italic_btn.setChecked(self.font_settings.get('italic', False))
 
-        if 'font_color' in self.note_data:
-            self.font_color = self.note_data['font_color']
-            if self.font_color != '#000000':
-                self.color_btn.setChecked(True)
-        else:
-            self.font_color = '#000000'
+        self.color_btn.setChecked(self.font_color_mode == 'manual')
+        self.color_btn.setToolTip(
+            '手动字体颜色（优先于主题和背景图默认文字色）'
+        )
 
-        self.color_btn.setStyleSheet(f'''
-            QPushButton {{
-                color: {self.font_color};
-                font-weight: bold;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }}
-            QPushButton:checked {{
-                background-color: #007acc;
-                color: white;
-                border: 1px solid #005a9e;
-            }}
-        ''')
+        initial_color_icon = (
+            self.font_color
+            if self.font_color_mode == 'manual'
+            else self._current_icon_color()
+        )
+        self.color_btn.setIcon(_make_vector_icon(
+            'font_color', initial_color_icon,
+            monochrome=self._has_background_image(),
+        ))
 
         auto_format_enabled = self.note_data.get('auto_format_enabled', True)
         self.text_edit.set_auto_format_enabled(auto_format_enabled)
@@ -599,12 +1380,28 @@ class StickyNote(QWidget):
                 QSize(saved_geometry.get('width', 400), saved_geometry.get('height', 300))
             )
         else:
-            smart_position = position_manager.get_smart_position(self.note_id)
-            self.resize(400, 300)
+            initial_size = self.recommended_initial_size()
+            smart_position = position_manager.get_smart_position(
+                self.note_id, initial_size
+            )
+            self.resize(initial_size)
             self.move(smart_position)
             position_manager.register_window_position(
-                self.note_id, smart_position, QSize(400, 300)
+                self.note_id, smart_position, initial_size
             )
+
+        # Geometry is now final enough to build the initial native rounded
+        # region. Subsequent interactive/DPI resizes rebuild it in
+        # ``resizeEvent``.
+        self._window_shape_ready = True
+        self._update_window_shape()
+
+        # Windows 11 Mica/backdrop is an optional enhancement.  The helper is
+        # deliberately called after geometry is established (so a native HWND
+        # exists) and never changes translucency flags on its own.  Unsupported
+        # systems and offscreen test sessions use the normal opaque gradient.
+        self._acrylic_enabled = self._try_enable_system_backdrop()
+        self.setProperty('acrylicEnabled', self._acrylic_enabled)
 
         # 更新提醒按钮显示
         self.update_reminder_display()
@@ -613,6 +1410,641 @@ class StickyNote(QWidget):
         self.refresh_tag_chips()
 
     # ==================== 字体和样式 ====================
+
+    def _configured_settings_tool_order(self):
+        """Read the shared order without making manager-less notes fragile."""
+        manager = getattr(self, 'manager', None)
+        if manager is not None:
+            getter = getattr(manager, 'get_settings_tool_order', None)
+            if callable(getter):
+                return normalize_settings_tool_order(getter())
+            config = getattr(manager, 'config', None)
+            if config is not None and hasattr(config, 'get'):
+                return normalize_settings_tool_order(
+                    config.get(SETTINGS_TOOL_ORDER_KEY, None)
+                )
+        return list(DEFAULT_SETTINGS_TOOL_ORDER)
+
+    def apply_settings_tool_order(self, order):
+        """Apply a validated left-to-right group order without recreating controls."""
+        normalised = normalize_settings_tool_order(order)
+        layout = getattr(self, 'settings_layout', None)
+        group_map = getattr(self, 'settings_tool_group_map', {})
+        if layout is None or not group_map:
+            return normalised
+        for group in group_map.values():
+            layout.removeWidget(group)
+        ordered_groups = []
+        for key in normalised:
+            group = group_map.get(key)
+            if group is None:
+                continue
+            layout.addWidget(group)
+            ordered_groups.append(group)
+        self.settings_tool_groups = ordered_groups
+        layout.invalidate()
+        layout.activate()
+        self._refresh_tool_group_widths()
+        return normalised
+
+    def _show_tool_rail(self, index: int):
+        """Switch the visible tool rail without recreating any controls."""
+        if not hasattr(self, 'tool_rail_stack'):
+            return
+        index = max(0, min(index, self.tool_rail_stack.count() - 1))
+        self.tool_rail_stack.setCurrentIndex(index)
+        for button_index, button in enumerate(self.tool_rail_buttons):
+            button.setChecked(button_index == index)
+        current_page = self.tool_rail_stack.currentWidget()
+        if current_page is not None:
+            current_page.setFocusPolicy(Qt.NoFocus)
+
+    def _make_tool_group(self, object_name: str, accessible_name: str, widgets):
+        """Create one bounded toolbar group without recreating its controls."""
+        group = QFrame()
+        group.setObjectName(object_name)
+        group.setProperty('toolGroup', True)
+        group.setAccessibleName(accessible_name)
+        group.setFocusPolicy(Qt.NoFocus)
+        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        group_layout = QHBoxLayout(group)
+        group_layout.setContentsMargins(3, 2, 3, 2)
+        group_layout.setSpacing(3)
+        for widget in widgets:
+            if isinstance(widget, QPushButton):
+                widget.setProperty('compactToolButton', True)
+            group_layout.addWidget(widget)
+        group.setFixedHeight(38)
+        # Fixed-width groups prevent Qt from compressing adjacent fixed-size
+        # buttons into each other when the outer scroll viewport is narrow.
+        group.setFixedWidth(group_layout.sizeHint().width() + 2)
+        return group
+
+    def _refresh_tool_group_widths(self):
+        """Re-fit groups after a label, icon, font or theme changes size."""
+        collections = (
+            getattr(self, 'format_tool_groups', []),
+            getattr(self, 'settings_tool_groups', []),
+            getattr(self, 'action_tool_groups', []),
+            [getattr(self, 'tool_rail_nav', None)],
+        )
+        for groups in collections:
+            for group in groups:
+                if group is None or group.layout() is None:
+                    continue
+                group.layout().invalidate()
+                group.layout().activate()
+                group.setFixedWidth(max(
+                    group.minimumSizeHint().width(),
+                    group.layout().sizeHint().width() + 2,
+                ))
+
+        # QScrollArea(widgetResizable=False) owns the content widget's
+        # geometry.  Resizing a child group alone leaves the panel at the
+        # width it had during initUI, so newly-polished labels/sliders can be
+        # painted into the next group. Recompute the real content width and
+        # push it through the scroll area after every theme/icon refresh.
+        for panel_name, scroll_name in (
+                ('format_panel', 'format_scroll'),
+                ('settings_panel', 'settings_scroll'),
+                ('action_panel', 'action_scroll')):
+            panel = getattr(self, panel_name, None)
+            if panel is None or panel.layout() is None:
+                continue
+            panel_layout = panel.layout()
+            panel_layout.invalidate()
+            panel_layout.activate()
+            hint = panel_layout.sizeHint()
+            panel.resize(max(1, hint.width()), max(
+                TOOL_CONTENT_MIN_HEIGHT, hint.height()
+            ))
+            panel.updateGeometry()
+            scroll = getattr(self, scroll_name, None)
+            if scroll is not None:
+                scroll.updateGeometry()
+                scroll.viewport().update()
+
+        # Reflow the nav/stack split after the nav group's width changes.  The
+        # stack is intentionally allowed to become narrow; each page then
+        # exposes its full content through its own horizontal scrollbar.
+        control_panel = getattr(self, 'control_panel', None)
+        if control_panel is not None and control_panel.layout() is not None:
+            control_layout = control_panel.layout()
+            control_layout.invalidate()
+            control_layout.activate()
+            control_panel.updateGeometry()
+        stack = getattr(self, 'tool_rail_stack', None)
+        if stack is not None:
+            stack.updateGeometry()
+
+    def recommended_initial_size(self):
+        """Size a new note so the complete action page is visible at first launch."""
+        self._refresh_tool_group_widths()
+        action_panel = getattr(self, 'action_panel', None)
+        nav = getattr(self, 'tool_rail_nav', None)
+        control_panel = getattr(self, 'control_panel', None)
+        main_layout = self.layout()
+        if (action_panel is None or action_panel.layout() is None or
+                nav is None or control_panel is None or
+                control_panel.layout() is None or main_layout is None):
+            return QSize(640, 300)
+
+        action_panel.layout().invalidate()
+        action_panel.layout().activate()
+        page_width = max(
+            action_panel.width(), action_panel.layout().sizeHint().width()
+        )
+        rail_layout = control_panel.layout()
+        rail_margins = rail_layout.contentsMargins()
+        outer_margins = main_layout.contentsMargins()
+        desired_width = (
+            outer_margins.left() + outer_margins.right() +
+            rail_margins.left() + rail_margins.right() +
+            nav.width() + rail_layout.spacing() + page_width + 4
+        )
+        desired_width = max(self.minimumWidth(), desired_width)
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available_width = screen.availableGeometry().width()
+            if available_width > 0:
+                # Preserve a small grab margin while using the full desktop
+                # width when that is what the complete action rail requires.
+                desired_width = min(
+                    desired_width,
+                    max(self.minimumWidth(), available_width - 16),
+                )
+        return QSize(int(desired_width), max(self.minimumHeight(), 300))
+
+    def _prepare_action_icons(self, color: str = '#334155', monochrome=None):
+        """Apply the stable vector icon set to action buttons.
+
+        Button object names and signals stay untouched.  Only presentation
+        changes, and the original text remains available through tooltips and
+        accessible names for keyboard/screen-reader users.
+        """
+        icon_map = {
+            'undo_btn': ('undo', '撤销 (Ctrl+Z)'),
+            'redo_btn': ('redo', '重做 (Ctrl+Y)'),
+            'tag_btn': ('tag', '设置标签'),
+            'reminder_btn': ('bell', '设置提醒'),
+            'lock_btn': ('lock' if self.is_locked else 'unlock',
+                         '解锁便签' if self.is_locked else '锁定便签'),
+            'link_btn': ('link', '插入链接'),
+            'image_btn': ('image', '插入图片'),
+            'background_btn': ('background', '选择便签背景图片'),
+            'clear_background_btn': ('clear_background', '清除便签背景图片'),
+            'background_text_color_btn': ('font_color', '设置背景图默认文字色'),
+            'background_control_color_btn': ('highlight', '设置背景图控件色'),
+            'reset_background_colors_btn': ('clear', '背景图颜色恢复自动'),
+            'md_toggle_btn': ('markdown', '切换 Markdown 预览'),
+            'backlink_btn': ('backlink', '便签反向链接'),
+            'delete_btn': ('trash', '删除便签'),
+            'help_btn': ('help', '使用说明'),
+            'hide_btn': ('hide', '隐藏便签'),
+            'highlight_btn': ('highlight', '背景高亮'),
+            'clear_highlight_btn': ('clear', '清除高亮'),
+            'decrease_font_btn': ('font_decrease', '减小字号'),
+            'increase_font_btn': ('font_increase', '增大字号'),
+            'bold_btn': ('bold', '加粗'), 'italic_btn': ('italic', '斜体'),
+            'color_btn': (
+                'font_color', '手动字体颜色（优先于主题和背景图默认文字色）'
+            ),
+            'underline_btn': ('underline', '下划线'),
+            'strikethrough_btn': ('strike', '删除线'),
+            'superscript_btn': ('superscript', '上标'), 'subscript_btn': ('subscript', '下标'),
+            'align_left_btn': ('align_left', '左对齐'), 'align_center_btn': ('align_center', '居中对齐'),
+            'align_right_btn': ('align_right', '右对齐'), 'ordered_list_btn': ('ordered_list', '有序列表'),
+            'unordered_list_btn': ('unordered_list', '无序列表'),
+        }
+        self._icon_color = color
+        if monochrome is None:
+            monochrome = self._has_background_image()
+        for name, (kind, description) in icon_map.items():
+            button = getattr(self, name, None)
+            if button is None:
+                continue
+            icon_color = color
+            if name == 'color_btn' and self.font_color_mode == 'manual' and not monochrome:
+                icon_color = self.font_color
+            button.setIcon(_make_vector_icon(kind, icon_color, monochrome=monochrome))
+            button.setIconSize(QSize(19, 19))
+            button.setAccessibleName(description)
+            # Keep the compact action row icon-led.  Tooltips carry the full
+            # label and remain visible for mouse and keyboard focus.
+            if name not in (
+                'delete_btn', 'hide_btn', 'background_btn', 'clear_background_btn',
+                'background_text_color_btn', 'background_control_color_btn',
+                'reset_background_colors_btn',
+            ):
+                button.setText('')
+            button.setToolTip(description)
+        if hasattr(self, 'clear_background_btn'):
+            self.clear_background_btn.setEnabled(self._has_background_image())
+        background_active = self._has_background_image()
+        for name in ('background_text_color_btn', 'background_control_color_btn'):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(background_active)
+        if hasattr(self, 'reset_background_colors_btn'):
+            self.reset_background_colors_btn.setEnabled(
+                background_active and bool(self.background_text_color or self.background_control_color)
+            )
+        self._refresh_tool_group_widths()
+
+    def _configure_accessibility(self):
+        """Keep existing actions named and keyboard-reachable."""
+        for name, label in {
+            'title_edit': '便签标题', 'text_edit': '便签内容编辑器',
+            'transparency_slider': '便签透明度', 'topmost_checkbox': '总在最前',
+            'format_checkbox': '智能格式化', 'delete_btn': '删除便签',
+            'hide_btn': '隐藏便签',
+            'control_opacity_slider': '控件透明度',
+            'background_btn': '选择便签背景图片',
+            'clear_background_btn': '清除便签背景图片',
+            'background_text_color_btn': '设置背景图默认文字色',
+            'background_control_color_btn': '设置背景图控件色',
+            'reset_background_colors_btn': '背景图颜色恢复自动',
+        }.items():
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setAccessibleName(label)
+                control.setFocusPolicy(Qt.StrongFocus)
+        action_names = [
+            'decrease_font_btn', 'increase_font_btn', 'bold_btn', 'italic_btn',
+            'color_btn', 'underline_btn', 'strikethrough_btn', 'superscript_btn',
+            'subscript_btn', 'align_left_btn', 'align_center_btn', 'align_right_btn',
+            'ordered_list_btn', 'unordered_list_btn', 'highlight_btn',
+            'clear_highlight_btn', 'undo_btn', 'redo_btn', 'tag_btn',
+            'reminder_btn', 'lock_btn', 'link_btn', 'image_btn', 'md_toggle_btn',
+            'backlink_btn', 'delete_btn', 'help_btn', 'hide_btn',
+        ]
+        actions = []
+        for name in action_names:
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setFocusPolicy(Qt.StrongFocus)
+                actions.append(control)
+        for name in ('format_scroll', 'settings_scroll', 'action_scroll'):
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setFocusPolicy(Qt.NoFocus)
+        order = ([self.title_edit, self.text_edit] + self.tool_rail_buttons +
+                 actions + [self.transparency_slider, self.control_opacity_slider,
+                            self.background_btn, self.clear_background_btn,
+                            self.background_text_color_btn,
+                            self.background_control_color_btn,
+                            self.reset_background_colors_btn,
+                            self.topmost_checkbox, self.format_checkbox])
+        for previous, current in zip(order, order[1:]):
+            self.setTabOrder(previous, current)
+
+    def _try_enable_system_backdrop(self) -> bool:
+        """Best-effort Windows 11 acrylic backdrop with a safe no-op fallback.
+
+        DWM is never required for rendering.  We avoid changing Qt's opacity
+        or translucency attributes, so unsupported Windows versions, Linux,
+        and offscreen test platforms keep the normal opaque themed surface.
+        """
+        if sys.platform != 'win32' or os.environ.get('QT_QPA_PLATFORM') in {'offscreen', 'minimal'}:
+            return False
+        try:
+            version = sys.getwindowsversion()
+            if (version.major, version.build) < (10, 22000):
+                return False
+            hwnd = int(self.winId()) if hasattr(self, 'winId') else 0
+            if not hwnd:
+                return False
+            dwmapi = ctypes.windll.dwmapi
+            # DWMWA_SYSTEMBACKDROP_TYPE = 38, value 3 = acrylic.
+            backdrop_type = ctypes.c_int(3)
+            result = dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd), 38,
+                ctypes.byref(backdrop_type), ctypes.sizeof(backdrop_type)
+            )
+            return result == 0
+        except Exception:
+            return False
+
+    def _rounded_window_path(self, rect=None, inset=None):
+        """Return the rounded path, inset so the border never paints square corners."""
+        if rect is None:
+            rect = QRectF(self.rect())
+        elif not isinstance(rect, QRectF):
+            rect = QRectF(rect)
+        if inset is None:
+            inset = self.WINDOW_BORDER_WIDTH / 2.0
+        inset = max(0.0, float(inset))
+        if inset:
+            rect = rect.adjusted(inset, inset, -inset, -inset)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return QPainterPath()
+        radius = min(
+            float(self.WINDOW_CORNER_RADIUS),
+            rect.width() / 2.0,
+            rect.height() / 2.0,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    def _update_window_shape(self):
+        """Rebuild the native rounded hit-test region after geometry changes.
+
+        QRegion is deliberately derived from the same path used by
+        ``paintEvent``.  The region is a binary hit-test boundary; antialiasing
+        remains the painter's responsibility, so the visible edge stays
+        smooth while the four corners are genuinely transparent/non-clickable.
+        """
+        if not getattr(self, '_window_shape_ready', False):
+            return
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        try:
+            # The hit-test mask follows the outer silhouette.  Painting uses
+            # a one-pixel inset so the centred pen cannot protrude beyond it.
+            path = self._rounded_window_path(inset=0)
+            polygon = path.toFillPolygon().toPolygon()
+            if polygon.isEmpty():
+                self.clearMask()
+                return
+            self.setMask(QRegion(polygon))
+            try:
+                self._window_shape_dpr = float(self.devicePixelRatioF())
+            except (AttributeError, TypeError, ValueError):
+                self._window_shape_dpr = 1.0
+        except Exception:
+            # Some non-composited/offscreen Qt plugins do not implement
+            # top-level masks.  Rendering still works; leave the best-effort
+            # mask absent rather than making construction fail.
+            logger.debug('无法更新便签圆角窗口区域', exc_info=True)
+
+    def resizeEvent(self, event):
+        """Keep the rounded region and Cover cache aligned with the window."""
+        super().resizeEvent(event)
+        if hasattr(self, '_background_scaled_size'):
+            self._background_scaled_size = QSize()
+        if hasattr(self, '_background_scaled_dpr'):
+            self._background_scaled_dpr = 0.0
+        if hasattr(self, '_background_scaled_cache'):
+            self._background_scaled_cache = QPixmap()
+        self._update_window_shape()
+        if getattr(self, 'auto_hidden', False) and self.hide_tab is not None:
+            self._position_hide_tab()
+
+    def changeEvent(self, event):
+        """Refresh shape/cache when Qt reports a screen or DPR transition."""
+        super().changeEvent(event)
+        if event.type() in _shape_refresh_event_types():
+            if hasattr(self, '_background_scaled_size'):
+                self._background_scaled_size = QSize()
+            if hasattr(self, '_background_scaled_dpr'):
+                self._background_scaled_dpr = 0.0
+            if hasattr(self, '_background_scaled_cache'):
+                self._background_scaled_cache = QPixmap()
+            self._update_window_shape()
+
+    def _background_candidates(self):
+        """Return the stored background path and whether it is app-managed."""
+        stored = str(getattr(self, 'background_image', '') or '').strip()
+        if not stored:
+            return '', False
+        if os.path.isabs(stored):
+            return os.path.realpath(stored), False
+        candidate = os.path.realpath(os.path.join(self.notes_dir, stored))
+        try:
+            safe = os.path.normcase(os.path.commonpath([candidate, self.notes_dir])) == os.path.normcase(self.notes_dir)
+        except ValueError:
+            safe = False
+        if not safe:
+            return '', False
+        images_prefix = os.path.normcase(os.path.join(self.notes_dir, 'images') + os.sep)
+        return candidate, os.path.normcase(candidate).startswith(images_prefix)
+
+    def _load_background_pixmap(self):
+        """Load a custom background once; invalid/missing files fall back safely."""
+        self._background_pixmap = QPixmap()
+        self._background_source = ''
+        self._background_scaled_cache = QPixmap()
+        self._background_scaled_size = QSize()
+        self._background_scaled_dpr = 1.0
+        self._background_invalid = False
+        path, _ = self._background_candidates()
+        if not path or not os.path.isfile(path):
+            self._background_invalid = bool(path)
+            return False
+        if not _has_supported_image_signature(path):
+            self._background_invalid = True
+            return False
+        image = QImage(path)
+        if image.isNull():
+            self._background_invalid = True
+            return False
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            self._background_invalid = True
+            return False
+        self._background_pixmap = pixmap
+        self._background_source = path
+        self._background_invalid = False
+        return True
+
+    def _managed_background_path(self, path):
+        """Check whether path is this note's own managed image before deletion."""
+        if not path:
+            return False
+        images_dir = os.path.realpath(os.path.join(self.notes_dir, 'images'))
+        real_path = os.path.realpath(path)
+        try:
+            if os.path.normcase(os.path.commonpath([real_path, images_dir])) != os.path.normcase(images_dir):
+                return False
+        except ValueError:
+            return False
+        prefix = f'background_{self.note_id}_'
+        return os.path.basename(real_path).startswith(prefix)
+
+    def choose_background_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, '选择便签背景图片', '',
+            '图片文件 (*.png *.jpg *.jpeg *.gif *.bmp *.webp)'
+        )
+        if not file_path:
+            return False
+        if not _has_supported_image_signature(file_path):
+            QMessageBox.warning(self, '背景图片无效', '所选文件不是可识别的 PNG、JPG、GIF、BMP 或 WebP 图片。')
+            return False
+        image = QImage(file_path)
+        if image.isNull():
+            QMessageBox.warning(self, '背景图片无效', '无法读取所选图片，便签背景未改变。')
+            return False
+        images_dir = os.path.realpath(os.path.join(self.notes_dir, 'images'))
+        os.makedirs(images_dir, exist_ok=True)
+        base = os.path.basename(file_path)
+        stem, ext = os.path.splitext(base)
+        safe_stem = re.sub(r'[^0-9A-Za-z一-龥._-]+', '_', stem)[:60] or 'image'
+        dest_name = f'background_{self.note_id}_{safe_stem}{ext.lower()}'
+        dest = os.path.realpath(os.path.join(images_dir, dest_name))
+        old_stored = self.background_image
+        old_path, old_managed = self._background_candidates()
+        had_background = self._has_background_image()
+        stage_path = ''
+        backup_path = ''
+        destination_replaced = False
+        try:
+            if os.path.normcase(os.path.commonpath([dest, images_dir])) != os.path.normcase(images_dir):
+                raise ValueError('背景图片路径不安全')
+            if os.path.normcase(os.path.realpath(file_path)) != os.path.normcase(dest):
+                stage_fd, stage_path = tempfile.mkstemp(
+                    prefix=f'.background_{self.note_id}_stage_',
+                    suffix=ext.lower(),
+                    dir=images_dir,
+                )
+                os.close(stage_fd)
+                shutil.copy2(file_path, stage_path)
+                if QImage(stage_path).isNull():
+                    raise ValueError('复制后的图片无法读取')
+                if os.path.exists(dest):
+                    backup_fd, backup_path = tempfile.mkstemp(
+                        prefix=f'.background_{self.note_id}_backup_',
+                        suffix=ext.lower(),
+                        dir=images_dir,
+                    )
+                    os.close(backup_fd)
+                    shutil.copy2(dest, backup_path)
+                os.replace(stage_path, dest)
+                stage_path = ''
+                destination_replaced = True
+            self.background_image = os.path.relpath(dest, self.notes_dir).replace(os.sep, '/')
+            if not self._load_background_pixmap():
+                raise ValueError('复制后的图片无法读取')
+            if not had_background and self.control_opacity >= 0.999:
+                self.control_opacity = 0.86
+                self.control_opacity_slider.blockSignals(True)
+                self.control_opacity_slider.setValue(86)
+                self.control_opacity_slider.blockSignals(False)
+                self.control_opacity_label.setText('控件透明度: 86%')
+            self.apply_theme()
+            # The icon helper derives monochrome mode from the successfully
+            # loaded pixmap; keeping that decision in one place prevents a
+            # stale/invalid image path from changing icon colors.
+            self._prepare_action_icons(self._current_icon_color())
+            if (old_managed and old_path and old_path != dest and
+                    self._managed_background_path(old_path)):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+            self.save_note()
+            self.update()
+            return True
+        except Exception as exc:
+            if destination_replaced:
+                try:
+                    if backup_path and os.path.exists(backup_path):
+                        os.replace(backup_path, dest)
+                        backup_path = ''
+                    elif os.path.exists(dest):
+                        os.remove(dest)
+                except OSError:
+                    logging.exception('恢复便签背景图片失败: %s', dest)
+            self.background_image = old_stored
+            self._load_background_pixmap()
+            QMessageBox.warning(self, '背景图片失败', f'无法设置背景图片：{exc}')
+            return False
+        finally:
+            for temporary_path in (stage_path, backup_path):
+                if temporary_path and os.path.exists(temporary_path):
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
+
+    def clear_background_image(self):
+        old_path, old_managed = self._background_candidates()
+        if old_managed and old_path and self._managed_background_path(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        self.background_image = ''
+        self._load_background_pixmap()
+        self.apply_theme()
+        self._prepare_action_icons(self._current_icon_color())
+        self.save_note()
+        self.update()
+        return True
+
+    def _current_icon_color(self):
+        return getattr(self, '_icon_color', '#334155')
+
+    def _has_background_image(self):
+        return bool(getattr(self, '_background_pixmap', QPixmap()).isNull() is False)
+
+    def _background_reference_color(self):
+        """Return a small-sample average used only for automatic contrast."""
+        if not self._has_background_image():
+            return QColor('#FFFFFF')
+        image = self._background_pixmap.toImage().scaled(
+            16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+        )
+        red = green = blue = count = 0
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixelColor(x, y)
+                if pixel.alpha() <= 8:
+                    continue
+                red += pixel.red()
+                green += pixel.green()
+                blue += pixel.blue()
+                count += 1
+        if not count:
+            return QColor('#FFFFFF')
+        return QColor(round(red / count), round(green / count), round(blue / count))
+
+    def choose_background_text_color(self):
+        if not self._has_background_image():
+            return False
+        styles = getattr(self, '_current_theme_styles', {})
+        initial = self.background_text_color or styles.get('text', '#111111')
+        color = QColorDialog.getColor(QColor(initial), self, '选择背景图默认文字色')
+        if not color.isValid():
+            return False
+        # This is intentionally separate from font_color/font_color_mode.
+        # Existing inline rich-text colors and a manual default font color win.
+        self.background_text_color = color.name()
+        self.apply_theme()
+        self.save_note()
+        return True
+
+    def choose_background_control_color(self):
+        if not self._has_background_image():
+            return False
+        styles = getattr(self, '_current_theme_styles', {})
+        initial = self.background_control_color or styles.get('control_surface', '#666666')
+        color = QColorDialog.getColor(QColor(initial), self, '选择背景图控件色')
+        if not color.isValid():
+            return False
+        self.background_control_color = color.name()
+        self.apply_theme()
+        self.save_note()
+        return True
+
+    def reset_background_colors(self):
+        self.background_text_color = ''
+        self.background_control_color = ''
+        self.apply_theme()
+        if not self.is_deleted:
+            self.save_note()
+        return True
+
+    def change_control_opacity(self, value):
+        self.control_opacity = max(0.2, min(1.0, int(value) / 100.0))
+        if hasattr(self, 'control_opacity_label'):
+            self.control_opacity_label.setText(f'控件透明度: {int(self.control_opacity * 100)}%')
+        if hasattr(self, 'theme'):
+            self.apply_theme()
+        if not self.is_deleted:
+            self.save_note()
 
     def set_font_size(self, title_size, content_size):
         title_font = QFont()
@@ -694,13 +2126,11 @@ class StickyNote(QWidget):
         font_size = font_settings.get('size', 12)
         font_weight = 'bold' if font_settings.get('bold', False) else 'normal'
         font_style = 'italic' if font_settings.get('italic', False) else 'normal'
-        font_color = getattr(self, 'font_color', '#000000')
         font_style_sheet = f'''
             font-family: "{font_family}" !important;
             font-size: {font_size}pt !important;
             font-weight: {font_weight} !important;
             font-style: {font_style} !important;
-            color: {font_color} !important;
         '''
         self.text_edit.setStyleSheet(self.text_edit.styleSheet() + font_style_sheet)
 
@@ -745,36 +2175,48 @@ class StickyNote(QWidget):
                 self.save_note()
 
     def choose_font_color(self):
+        # A body selection is an inline formatting operation. Keep the
+        # current default color as the dialog seed, but do not turn a
+        # selection into a note-wide ``font_color_mode=manual`` override.
+        body_cursor = self.text_edit.textCursor()
+        has_body_selection = body_cursor.hasSelection()
         current_color = getattr(self, 'font_color', '#000000')
+        if has_body_selection:
+            selected_color = body_cursor.charFormat().foreground().color()
+            if selected_color.isValid():
+                current_color = selected_color.name()
         color = QColorDialog.getColor(QColor(current_color), self, '\u9009\u62e9\u5b57\u4f53\u989c\u8272')
         if not color.isValid():
-            return
+            self.color_btn.setChecked(self.font_color_mode == 'manual')
+            return False
         color_hex = color.name()
+        if has_body_selection:
+            # Apply only an inline foreground to the selected body range. In
+            # particular, do not call apply_theme() here: changing the note's
+            # default body color would recolor every unformatted character
+            # and the title through the shared theme stylesheet.
+            char_format = body_cursor.charFormat()
+            char_format.setForeground(QColor(color_hex))
+            body_cursor.mergeCharFormat(char_format)
+            if not self.is_deleted:
+                self.save_note()
+            return True
+
+        # With no selection, the color is the body editor's insertion/default
+        # format. It may persist as the note's manual body color, but the
+        # title color is resolved independently by _theme_tokens_from_css().
+        char_format = self.text_edit.currentCharFormat()
+        char_format.setForeground(QColor(color_hex))
+        self.text_edit.setCurrentCharFormat(char_format)
         self.font_color = color_hex
+        self.font_color_mode = 'manual'
         self.color_btn.setChecked(True)
-        self.color_btn.setStyleSheet(f'''
-            QPushButton {{
-                color: {color_hex}; font-weight: bold;
-                border: 1px solid #ccc; border-radius: 3px;
-            }}
-            QPushButton:checked {{
-                background-color: #007acc; color: white;
-                border: 1px solid #005a9e;
-            }}
-        ''')
-        current_editor = self._get_focused_editor()
-        cursor = current_editor.textCursor()
-        if cursor.hasSelection():
-            char_format = cursor.charFormat()
-            char_format.setForeground(QColor(color_hex))
-            cursor.mergeCharFormat(char_format)
-        else:
-            char_format = current_editor.currentCharFormat()
-            char_format.setForeground(QColor(color_hex))
-            current_editor.setCurrentCharFormat(char_format)
         self.note_data['font_color'] = color_hex
+        self.note_data['font_color_mode'] = 'manual'
+        self.apply_theme()
         if not self.is_deleted:
             self.save_note()
+        return True
 
     def _get_focused_editor(self):
         if self.text_edit.hasFocus():
@@ -804,41 +2246,293 @@ class StickyNote(QWidget):
         return False
 
     def get_adaptive_control_styles(self, is_dark):
-        if is_dark:
-            return {
-                'separator_color': '#CCCCCC', 'bg': '#555555',
-                'color': '#FFFFFF', 'border': '#777777',
-                'hover_bg': '#666666', 'checked_bg': '#007acc',
-                'checked_color': '#FFFFFF'
-            }
+        high_contrast = 'high_contrast' in str(getattr(self, 'theme', '')).lower()
+        tokens = _semantic_ui_tokens(is_dark, high_contrast)
+        # Compatibility aliases keep existing integrations source-compatible.
+        return {
+            **tokens,
+            'separator_color': tokens['muted'], 'bg': tokens['surface_alt'],
+            'color': tokens['text'], 'hover_bg': tokens['surface'],
+            'pressed_bg': tokens['border'], 'checked_bg': tokens['accent'],
+            'checked_color': tokens['accent_text'], 'focus_border': tokens['focus'],
+            'muted': tokens['muted'], 'panel_bg': tokens['canvas'],
+            'input_bg': tokens['surface'], 'input_border': tokens['border'],
+            'editor_bg': tokens['surface'], 'card_start': tokens['surface'],
+            'card_end': tokens['surface_alt'], 'accent_start': tokens['accent'],
+            'accent_end': tokens['accent'], 'title_start': tokens['surface'],
+            'title_end': tokens['surface'],
+        }
+
+    def _theme_tokens_from_css(self, css: str, is_dark: bool):
+        """Overlay semantic chrome tokens with colors declared by the theme."""
+        tokens = self.get_adaptive_control_styles(is_dark)
+        selectors = {
+            'canvas': ('StickyNote', ('background-color', 'background')),
+            'surface': ('QTextEdit', ('background-color', 'background')),
+            'text': ('QTextEdit', ('color',)),
+            'border': ('QTextEdit', ('border',)),
+            'accent': ('QPushButton', ('background-color', 'background')),
+            'control_surface': ('QPushButton', ('background-color', 'background')),
+            'control_text': ('QPushButton', ('color',)),
+            'control_hover': ('QPushButton:hover', ('background-color', 'background')),
+        }
+        for key, (selector, properties) in selectors.items():
+            color = _css_property_color(css, selector, properties)
+            if color:
+                tokens[key] = color
+        tokens['surface_alt'] = tokens['surface']
+        tokens['editor_bg'] = tokens['surface']
+        tokens['input_bg'] = tokens['surface']
+        tokens['title_surface'] = _css_property_color(
+            css, 'QLineEdit', ('background-color', 'background')
+        ) or tokens['surface']
+        theme_title_text = _css_property_color(css, 'QLineEdit', ('color',)) or tokens['text']
+        theme_title_border = _css_property_color(css, 'QLineEdit', ('border',)) or tokens['border']
+        tokens.setdefault('control_surface', tokens['accent'])
+        tokens.setdefault('control_text', tokens['text'])
+        tokens.setdefault('control_hover', tokens['surface'])
+
+        background_active = self._has_background_image()
+        reference_surface = self._background_reference_color().name() if background_active else tokens['canvas']
+        effective_editor_surface = (
+            _mix_colors(reference_surface, tokens['editor_bg'], self.control_opacity)
+            if background_active else tokens['editor_bg']
+        )
+        effective_title_surface = (
+            _mix_colors(reference_surface, tokens['title_surface'], self.control_opacity)
+            if background_active else tokens['title_surface']
+        )
+
+        theme_text = _readable_color(tokens['text'], tokens['editor_bg'], 4.5)
+        theme_title_text = _readable_color(theme_title_text, tokens['title_surface'], 4.5)
+        # The title has its own visual role. Resolve its theme/background
+        # color before applying the body font override so a manual body color
+        # can never leak into the title editor.
+        effective_theme_title_text = _readable_color(
+            theme_title_text, effective_title_surface, 4.5
+        )
+        if self.font_color_mode == 'manual':
+            # Explicit manual font color is the body default only. Inline
+            # rich-text colors remain even more specific inside the
+            # QTextDocument, and the title keeps its own theme/background
+            # color instead of inheriting the body setting.
+            tokens['text'] = self.font_color
+            tokens['title_text'] = effective_theme_title_text
+        elif background_active and self.background_text_color:
+            tokens['text'] = self.background_text_color
+            tokens['title_text'] = self.background_text_color
+        elif background_active:
+            tokens['text'] = _readable_color(theme_text, effective_editor_surface, 4.5)
+            tokens['title_text'] = effective_theme_title_text
         else:
-            return {
-                'separator_color': '#666666', 'bg': '#F0F0F0',
-                'color': '#000000', 'border': '#CCCCCC',
-                'hover_bg': '#E0E0E0', 'checked_bg': '#007acc',
-                'checked_color': '#FFFFFF'
-            }
+            tokens['text'] = theme_text
+            tokens['title_text'] = theme_title_text
+
+        if background_active and self.background_control_color:
+            tokens['control_surface'] = self.background_control_color
+            tokens['accent'] = self.background_control_color
+            target = '#111111' if QColor(reference_surface).lightness() > 128 else '#FFFFFF'
+            tokens['control_hover'] = _mix_colors(self.background_control_color, target, 0.14)
+        else:
+            tokens['control_surface'] = _contrasting_surface(
+                tokens['control_surface'], reference_surface, 3.0
+            )
+            tokens['accent'] = tokens['control_surface']
+            tokens['control_hover'] = _contrasting_surface(
+                tokens['control_hover'], reference_surface, 3.0
+            )
+        canvas_color = QColor(tokens['canvas'])
+        text_color = QColor(tokens['text'])
+        border_color = QColor(tokens['border'])
+        high_contrast_theme = (
+            'high_contrast' in str(getattr(self, 'theme', '')).lower() or
+            (canvas_color.lightness() < 35 and text_color.lightness() > 220 and
+             border_color.lightness() > 190)
+        )
+        if high_contrast_theme and not (background_active and self.background_control_color):
+            # The theme's dark button surface is not an accessible focus cue.
+            # Preserve its bright border for keyboard focus and selected tabs.
+            tokens['focus'] = tokens['border']
+            tokens['accent'] = tokens['border']
+            tokens['selection'] = tokens['border']
+        else:
+            tokens['focus'] = _contrasting_surface(tokens['accent'], reference_surface, 3.0)
+
+        # Text/icons are rendered opaque over translucent control fills. Test
+        # them against the *composited* normal, hover and checked surfaces—not
+        # merely the source theme color. This is the key distinction for image
+        # backgrounds and low control-opacity values.
+        if background_active:
+            effective_control_surface = _mix_colors(
+                reference_surface, tokens['control_surface'], self.control_opacity
+            )
+            effective_control_hover = _mix_colors(
+                reference_surface, tokens['control_hover'],
+                min(1.0, self.control_opacity + 0.08),
+            )
+            effective_panel_surface = _mix_colors(
+                reference_surface, tokens['surface'], self.control_opacity
+            )
+        else:
+            effective_control_surface = tokens['control_surface']
+            effective_control_hover = tokens['control_hover']
+            effective_panel_surface = tokens['canvas']
+
+        control_text = _readable_color(
+            tokens['control_text'], effective_control_surface, 4.5
+        )
+        if _contrast_ratio(control_text, effective_control_hover) < 4.5:
+            # An icon cannot recolor itself through QSS. Keep the hover fill on
+            # the same luminance side and communicate hover via the focus
+            # border, rather than making the icon disappear mid-interaction.
+            tokens['control_hover'] = tokens['control_surface']
+            effective_control_hover = effective_control_surface
+        tokens['control_text'] = control_text
+        # Checked/active buttons retain their readable surface and use the
+        # accent as an opaque border. This preserves both icon contrast and a
+        # redundant non-color state cue.
+        effective_accent_surface = effective_control_surface
+        tokens['accent_text'] = _readable_color(
+            tokens.get('accent_text', control_text), tokens['accent'], 4.5
+        )
+        tokens['panel_text'] = _readable_color(
+            tokens.get('muted', tokens['text']), effective_panel_surface, 4.5
+        )
+        tokens['rail_surface'] = (
+            tokens['control_surface'] if background_active else tokens['canvas']
+        )
+        tokens['rail_hover'] = tokens['control_hover']
+        tokens['rail_checked'] = tokens['rail_surface']
+        tokens['rail_text'] = _readable_color(
+            tokens['control_text'], tokens['rail_surface'], 4.5
+        )
+        if _contrast_ratio(tokens['rail_text'], tokens['rail_hover']) < 4.5:
+            tokens['rail_hover'] = tokens['rail_surface']
+        tokens['effective_control_surface'] = effective_control_surface
+        tokens['effective_control_hover'] = effective_control_hover
+        tokens['effective_accent_surface'] = effective_accent_surface
+        tokens['effective_panel_surface'] = effective_panel_surface
+        tokens['border'] = _contrasting_surface(tokens['border'], reference_surface, 3.0)
+        tokens['input_border'] = tokens['border']
+        tokens['title_border'] = _contrasting_surface(
+            theme_title_border, reference_surface, 3.0
+        )
+        tokens['selection'] = tokens['accent']
+        tokens['selection_text'] = tokens['accent_text']
+        tokens['muted'] = _readable_color(tokens['muted'], reference_surface, 4.5)
+
+        # Refresh compatibility aliases after all theme/user overrides.
+        tokens.update({
+            'separator_color': tokens['muted'], 'bg': tokens['control_surface'],
+            'color': tokens['control_text'], 'hover_bg': tokens['control_hover'],
+            'pressed_bg': tokens['border'], 'checked_bg': tokens['accent'],
+            'checked_color': tokens['accent_text'], 'focus_border': tokens['focus'],
+            'panel_bg': tokens['canvas'], 'input_bg': tokens['surface'],
+            'card_start': tokens['surface'], 'card_end': tokens['surface_alt'],
+            'accent_start': tokens['accent'], 'accent_end': tokens['accent'],
+            'title_start': tokens['title_surface'], 'title_end': tokens['title_surface'],
+        })
+        tokens['title_alpha'] = _rgba_for_hex(tokens['title_surface'], self.control_opacity)
+        tokens['editor_alpha'] = _rgba_for_hex(tokens['editor_bg'], self.control_opacity)
+        tokens['control_alpha'] = _rgba_for_hex(tokens['control_surface'], self.control_opacity)
+        tokens['control_hover_alpha'] = _rgba_for_hex(
+            tokens['control_hover'], min(1.0, self.control_opacity + 0.08)
+        )
+        tokens['panel_alpha'] = _rgba_for_hex(tokens['surface'], self.control_opacity)
+        tokens['accent_alpha'] = _rgba_for_hex(tokens['accent'], self.control_opacity)
+        return tokens
 
     def apply_adaptive_control_styles(self, styles):
+        background_active = self._has_background_image()
+        chrome_text = styles['panel_text'] if background_active else styles['separator_color']
         # 分隔符标签样式
         for sep in ['separator1', 'separator2', 'separator3', 'separator4',
                      'separator5', 'separator6', 'separator7']:
             if hasattr(self, sep):
-                getattr(self, sep).setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
-        if hasattr(self, 'transparency_label'):
-            self.transparency_label.setStyleSheet(f'color: {styles["separator_color"]}; margin: 0 5px;')
+                getattr(self, sep).setStyleSheet(f'color: {chrome_text}; margin: 0 5px;')
+        for label_name in ('transparency_label', 'control_opacity_label'):
+            if hasattr(self, label_name):
+                getattr(self, label_name).setStyleSheet(
+                    f'color: {chrome_text}; margin: 0 5px; font-weight: 500;'
+                )
+        if hasattr(self, 'version_label'):
+            self.version_label.setStyleSheet(
+                f'color: {chrome_text}; font-size: 7pt; '
+                'background: transparent; border: none;'
+            )
+        for checkbox_name in ('topmost_checkbox', 'format_checkbox'):
+            checkbox = getattr(self, checkbox_name, None)
+            if checkbox is not None:
+                checkbox.setStyleSheet(f'''
+                    QCheckBox {{
+                        color: {chrome_text}; background: transparent;
+                        spacing: 6px; padding: 2px 4px;
+                    }}
+                    QCheckBox:focus {{
+                        border: 1px solid {styles['focus']};
+                        border-radius: 4px;
+                    }}
+                ''')
 
         # 通用按钮模板
+        button_styles = dict(styles)
+        button_styles.update({
+            'button_bg': styles['control_alpha'] if background_active else styles['control_surface'],
+            'button_hover': styles['control_hover_alpha'] if background_active else styles['control_hover'],
+            'button_text': styles['control_text'],
+            'checked_surface': styles['control_alpha'] if background_active else styles['control_surface'],
+        })
         button_template = '''
             QPushButton {{
-                background-color: {bg}; color: {color}; border: 1px solid {border};
-                border-radius: 3px; font-weight: bold;
+                background-color: {button_bg}; color: {button_text};
+                border: 1px solid {border}; border-radius: {radius_control}px;
+                font-weight: 600; padding: 0 7px; min-height: 28px;
             }}
-            QPushButton:hover {{ background-color: {hover_bg}; }}
-            QPushButton:checked {{ background-color: {checked_bg}; color: {checked_color}; border: 1px solid {checked_bg}; }}
-            QPushButton:disabled {{ color: #888; background-color: #444; }}
+            QPushButton[compactToolButton="true"] {{ padding: 0 4px; }}
+            QPushButton:hover {{ background-color: {button_hover}; border-color: {focus}; }}
+            QPushButton:pressed {{
+                background-color: {button_hover}; border: 2px solid {focus};
+            }}
+            QPushButton:focus {{ border: 2px solid {focus}; }}
+            QPushButton:checked {{
+                background-color: {checked_surface}; color: {button_text}; border: 2px solid {accent};
+            }}
+            QPushButton#reminderButton[reminderActive="true"] {{
+                background-color: {checked_surface}; color: {button_text}; border: 2px solid {accent};
+            }}
+            QPushButton#deleteButton {{
+                background-color: transparent; color: {danger}; border-color: {danger_border};
+            }}
+            QPushButton#deleteButton:hover {{ background-color: {danger}; color: {accent_text}; border-color: {danger}; }}
+            QPushButton:disabled {{ color: {muted}; background-color: transparent; border-color: {border}; }}
         '''
-        base_style = button_template.format(**styles)
+        base_style = button_template.format(**button_styles)
+
+        if hasattr(self, 'tool_rail_buttons'):
+            rail_tab_style = f'''
+                QPushButton {{
+                    background: {styles['rail_surface']};
+                    color: {styles['rail_text']};
+                    border: 1px solid {styles['border']};
+                    border-radius: 6px; font-weight: 600; padding: 0;
+                }}
+                QPushButton:hover {{
+                    background: {styles['rail_hover']};
+                    border-color: {styles['focus']};
+                }}
+                QPushButton:focus {{ border: 2px solid {styles['focus']}; }}
+                QPushButton:checked {{
+                    background: {styles['rail_checked']};
+                    border: 2px solid {styles['accent']};
+                }}
+            '''
+            for button in self.tool_rail_buttons:
+                button.setStyleSheet(rail_tab_style)
+                button.setIcon(_make_vector_icon(
+                    button.property('toolRailIcon'), styles['rail_text'],
+                    monochrome=self._has_background_image()
+                ))
+                button.setIconSize(QSize(20, 20))
 
         # 字体工具栏按钮
         for btn in ['decrease_font_btn', 'increase_font_btn', 'bold_btn',
@@ -851,33 +2545,190 @@ class StickyNote(QWidget):
 
         # 斜体按钮（加 italic 样式）
         if hasattr(self, 'italic_btn'):
-            italic_style = button_template.replace('font-weight: bold;', 'font-weight: bold; font-style: italic;').format(**styles)
+            italic_style = button_template.replace('font-weight: bold;', 'font-weight: bold; font-style: italic;').format(**button_styles)
             self.italic_btn.setStyleSheet(italic_style)
 
-        # 颜色按钮（红色文字）
+        # 字体颜色按钮使用所选颜色绘制图标，按钮状态仍遵循同一套令牌。
         if hasattr(self, 'color_btn'):
-            color_style = button_template.replace('color: {color}', 'color: red').format(**styles)
-            self.color_btn.setStyleSheet(color_style)
+            self.color_btn.setStyleSheet(base_style)
+            selected_color = (
+                self.font_color if self.font_color_mode == 'manual'
+                else styles['control_text'] if background_active else styles['text']
+            )
+            self.color_btn.setIcon(_make_vector_icon(
+                'font_color', selected_color, monochrome=background_active
+            ))
 
         # 功能按钮（撤销/重做/标签/提醒/锁定/链接/图片/MD/反链/删除/帮助/隐藏）
         for btn in ['undo_btn', 'redo_btn', 'tag_btn', 'reminder_btn',
                      'lock_btn', 'link_btn', 'image_btn', 'md_toggle_btn',
-                     'backlink_btn', 'help_btn', 'hide_btn']:
+                     'backlink_btn', 'help_btn', 'hide_btn', 'background_btn',
+                     'clear_background_btn', 'background_text_color_btn',
+                     'background_control_color_btn', 'reset_background_colors_btn']:
             if hasattr(self, btn):
                 getattr(self, btn).setStyleSheet(base_style)
 
         # 删除按钮特殊样式（红色调）
         if hasattr(self, 'delete_btn'):
-            danger_style = base_style.replace(styles['bg'], '#e74c3c').replace(styles['hover_bg'], '#c0392b')
+            danger_style = base_style
             self.delete_btn.setStyleSheet(danger_style)
+
+        # Text fields and the two horizontally scrollable action strips use a
+        # consistent visual hierarchy.  Object names keep these rules local to
+        # the note window and avoid changing dialogs opened by the app.
+        if hasattr(self, 'title_edit'):
+            self.title_edit.setStyleSheet(f'''
+                QLineEdit#noteTitle {{
+                    background-color: {styles['title_alpha'] if background_active else styles['title_surface']};
+                    color: {styles['title_text']};
+                    border: 1px solid {styles['title_border']};
+                    border-radius: {styles['radius_field']}px;
+                    padding: 0 13px;
+                    font-weight: 700;
+                    selection-background-color: {styles['selection']};
+                    selection-color: {styles['selection_text']};
+                }}
+                QLineEdit#noteTitle:hover {{ border-color: {styles['focus_border']}; }}
+                QLineEdit#noteTitle:focus {{ border: 2px solid {styles['focus_border']}; }}
+            ''')
+        if hasattr(self, 'text_edit'):
+            self.text_edit.setStyleSheet(f'''
+                QTextEdit {{
+                    background-color: {styles['editor_alpha'] if background_active else styles['editor_bg']};
+                    color: {styles['text']};
+                    border: 1px solid {styles['input_border']};
+                    border-radius: {styles['radius_field']}px;
+                    padding: 12px;
+                    selection-background-color: {styles['selection']};
+                    selection-color: {styles['selection_text']};
+                }}
+                QTextEdit:hover {{ border-color: {styles['focus_border']}; }}
+                QTextEdit:focus {{ border: 2px solid {styles['focus_border']}; }}
+            ''')
+        if hasattr(self, 'format_scroll'):
+            panel_border = (
+                f'border: 1px solid {styles["border"]}; border-radius: 8px;'
+                if background_active else
+                f'border-top: 1px solid {styles["border"]}; border-radius: 0;'
+            )
+            strip_style = f'''
+                QScrollArea#formatScroll, QScrollArea#settingsScroll,
+                QScrollArea#actionScroll {{
+                    background: transparent; border: none;
+                }}
+                QWidget#formatPanel, QWidget#settingsPanel, QWidget#actionPanel {{
+                    background: transparent;
+                }}
+                QFrame#controlPanel {{
+                    background: {styles['panel_alpha'] if background_active else styles['canvas']};
+                    {panel_border}
+                }}
+                QFrame[toolGroup="true"] {{
+                    background-color: {styles['panel_alpha'] if background_active else styles['surface']};
+                    border: 1px solid {styles['border']};
+                    border-radius: 9px;
+                }}
+                QFrame#toolRailNav {{
+                    background-color: {styles['panel_alpha'] if background_active else styles['surface_alt']};
+                }}
+                QFrame#actionDangerGroup {{ border-color: {styles['danger_border']}; }}
+                QScrollArea#formatScroll QScrollBar:horizontal,
+                QScrollArea#settingsScroll QScrollBar:horizontal,
+                QScrollArea#actionScroll QScrollBar:horizontal {{
+                    height: 10px; background: transparent;
+                }}
+                QScrollArea#formatScroll QScrollBar::handle:horizontal,
+                QScrollArea#settingsScroll QScrollBar::handle:horizontal,
+                QScrollArea#actionScroll QScrollBar::handle:horizontal {{
+                    background: {styles['border']}; border-radius: 3px; min-width: 34px;
+                }}
+                QScrollArea#formatScroll QScrollBar::handle:horizontal:hover,
+                QScrollArea#settingsScroll QScrollBar::handle:horizontal:hover,
+                QScrollArea#actionScroll QScrollBar::handle:horizontal:hover {{
+                    background: {styles['focus']};
+                }}
+                QScrollArea#formatScroll QScrollBar::add-line:horizontal,
+                QScrollArea#formatScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::add-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::add-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::sub-line:horizontal {{ width: 0; }}
+            '''
+            self.format_scroll.setStyleSheet(strip_style)
+            self.settings_scroll.setStyleSheet(strip_style)
+            self.action_scroll.setStyleSheet(strip_style)
+            self.control_panel.setStyleSheet(strip_style)
+        self._prepare_action_icons(styles['control_text'])
 
     @staticmethod
     def _get_extra_theme_css(is_dark):
         """生成所有主题通用的补充 CSS（QScrollBar、Slider groove、QStackedWidget 等）"""
+        # New callers pass the semantic style map.  The boolean branch below
+        # remains as a compatibility fallback for external integrations.
+        if isinstance(is_dark, dict):
+            styles = is_dark
+            return f'''
+                QWidget#formatPanel, QWidget#settingsPanel, QWidget#actionPanel {{ background: transparent; }}
+                QScrollArea#formatScroll, QScrollArea#settingsScroll,
+                QScrollArea#actionScroll {{ background: transparent; border: none; }}
+                QScrollArea#formatScroll QScrollBar:horizontal,
+                QScrollArea#settingsScroll QScrollBar:horizontal,
+                QScrollArea#actionScroll QScrollBar:horizontal {{ height: 10px; background: transparent; }}
+                QScrollArea#formatScroll QScrollBar::handle:horizontal,
+                QScrollArea#settingsScroll QScrollBar::handle:horizontal,
+                QScrollArea#actionScroll QScrollBar::handle:horizontal {{
+                    background: {styles['border']}; border-radius: 3px; min-width: 34px;
+                }}
+                QScrollArea#formatScroll QScrollBar::add-line:horizontal,
+                QScrollArea#formatScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::add-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::add-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::sub-line:horizontal {{ width: 0; }}
+                QScrollBar:vertical {{ background: transparent; width: 10px; border: none; }}
+                QScrollBar::handle:vertical {{
+                    background: {styles['border']}; border-radius: 5px; min-height: 30px;
+                }}
+                QScrollBar::handle:vertical:hover {{ background: {styles['muted']}; }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+                QScrollBar:horizontal {{ background: transparent; height: 10px; border: none; }}
+                QScrollBar::handle:horizontal {{
+                    background: {styles['border']}; border-radius: 5px; min-width: 30px;
+                }}
+                QScrollBar::handle:horizontal:hover {{ background: {styles['muted']}; }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}
+                QSlider::groove:horizontal {{
+                    background: {styles['border']}; height: 5px; border-radius: 2px;
+                }}
+                QSlider::sub-page:horizontal {{ background: {styles['accent']}; border-radius: 2px; }}
+                QSlider::handle:horizontal {{
+                    background: {styles['surface']}; border: 2px solid {styles['accent']};
+                    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
+                }}
+                QStackedWidget {{ background: transparent; border: none; }}
+                QLabel {{ background: transparent; }}
+            '''
         if is_dark:
             return '''
+                QWidget#formatPanel, QWidget#settingsPanel, QWidget#actionPanel { background: transparent; }
+                QScrollArea#formatScroll, QScrollArea#settingsScroll,
+                QScrollArea#actionScroll { background: transparent; border: none; }
+                QScrollArea#formatScroll QScrollBar:horizontal,
+                QScrollArea#settingsScroll QScrollBar:horizontal,
+                QScrollArea#actionScroll QScrollBar:horizontal { height: 10px; background: transparent; }
+                QScrollArea#formatScroll QScrollBar::handle:horizontal,
+                QScrollArea#settingsScroll QScrollBar::handle:horizontal,
+                QScrollArea#actionScroll QScrollBar::handle:horizontal { background: #64748B; border-radius: 3px; min-width: 34px; }
+                QScrollArea#formatScroll QScrollBar::add-line:horizontal,
+                QScrollArea#formatScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::add-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::add-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollBar:vertical {
-                    background: #2b2b2b; width: 12px; border: none;
+                    background: transparent; width: 10px; border: none;
                 }
                 QScrollBar::handle:vertical {
                     background: #555; border-radius: 6px; min-height: 30px;
@@ -895,8 +2746,10 @@ class StickyNote(QWidget):
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
                 QSlider::groove:horizontal {
-                    background: #555; height: 6px; border-radius: 3px;
+                    background: #334155; height: 6px; border-radius: 3px;
                 }
+                QSlider::sub-page:horizontal { background: #3B82F6; border-radius: 3px; }
+                QSlider::handle:horizontal { background: #DBEAFE; border: 2px solid #3B82F6; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
                 QStackedWidget { background: transparent; border: none; }
                 QTextBrowser {
                     background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #555;
@@ -905,8 +2758,23 @@ class StickyNote(QWidget):
             '''
         else:
             return '''
+                QWidget#formatPanel, QWidget#settingsPanel, QWidget#actionPanel { background: transparent; }
+                QScrollArea#formatScroll, QScrollArea#settingsScroll,
+                QScrollArea#actionScroll { background: transparent; border: none; }
+                QScrollArea#formatScroll QScrollBar:horizontal,
+                QScrollArea#settingsScroll QScrollBar:horizontal,
+                QScrollArea#actionScroll QScrollBar:horizontal { height: 10px; background: transparent; }
+                QScrollArea#formatScroll QScrollBar::handle:horizontal,
+                QScrollArea#settingsScroll QScrollBar::handle:horizontal,
+                QScrollArea#actionScroll QScrollBar::handle:horizontal { background: #CBD5E1; border-radius: 3px; min-width: 34px; }
+                QScrollArea#formatScroll QScrollBar::add-line:horizontal,
+                QScrollArea#formatScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::add-line:horizontal,
+                QScrollArea#settingsScroll QScrollBar::sub-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::add-line:horizontal,
+                QScrollArea#actionScroll QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollBar:vertical {
-                    background: #f5f5f5; width: 12px; border: none;
+                    background: transparent; width: 10px; border: none;
                 }
                 QScrollBar::handle:vertical {
                     background: #ccc; border-radius: 6px; min-height: 30px;
@@ -924,8 +2792,10 @@ class StickyNote(QWidget):
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
                 QSlider::groove:horizontal {
-                    background: #ddd; height: 6px; border-radius: 3px;
+                    background: #E2E8F0; height: 6px; border-radius: 3px;
                 }
+                QSlider::sub-page:horizontal { background: #3B82F6; border-radius: 3px; }
+                QSlider::handle:horizontal { background: #EFF6FF; border: 2px solid #3B82F6; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
                 QStackedWidget { background: transparent; border: none; }
                 QTextBrowser {
                     background-color: #FFFFFF; color: #333; border: 1px solid #ddd;
@@ -957,19 +2827,30 @@ class StickyNote(QWidget):
                 return
 
             is_dark = self.is_dark_theme(style)
+            adaptive_styles = self._theme_tokens_from_css(style, is_dark)
+            self._current_theme_styles = adaptive_styles
             # 追加通用补充 CSS（QScrollBar / QSlider groove / QStackedWidget 等）
-            extra_css = self._get_extra_theme_css(is_dark)
-            full_style = style + extra_css
+            extra_css = self._get_extra_theme_css(adaptive_styles)
+            # Give the frameless note a soft card silhouette while retaining
+            # the palette supplied by each user-selectable theme.
+            # The top-level surface is painted by ``paintEvent``.  Keeping the
+            # root background transparent prevents QSS from filling the native
+            # rectangular corners before the rounded path is composited.
+            full_style = style + extra_css + (
+                '\nStickyNote { background: transparent; '
+                'background-color: transparent; border: none; '
+                f'border-radius: {self.WINDOW_CORNER_RADIUS}px; }}'
+            )
             self.setStyleSheet(full_style)
             self.text_edit.setStyleSheet(full_style)
             self.title_edit.setStyleSheet(full_style)
-            adaptive_styles = self.get_adaptive_control_styles(is_dark)
             self.apply_adaptive_control_styles(adaptive_styles)
+            self._refresh_hide_tab_style()
             # md_preview 根据深色/浅色主题设置独立样式
             if hasattr(self, 'md_preview'):
-                md_bg = '#2b2b2b' if is_dark else '#FFFFFF'
-                md_border = '#555' if is_dark else '#ddd'
-                md_text = '#e0e0e0' if is_dark else '#333333'
+                md_bg = adaptive_styles['surface']
+                md_border = adaptive_styles['border']
+                md_text = adaptive_styles['text']
                 self.md_preview.setStyleSheet(f'''
                     QTextBrowser {{
                         background-color: {md_bg};
@@ -978,7 +2859,7 @@ class StickyNote(QWidget):
                     }}
                 ''')
             # 更新边框画笔颜色以匹配主题
-            self._border_pen.setColor(QColor(100, 100, 100) if is_dark else QColor(200, 200, 200))
+            self._border_pen.setColor(QColor(adaptive_styles['border']))
             if hasattr(self, 'font_settings') and self.font_settings:
                 self.apply_font()
         except Exception as e:
@@ -988,7 +2869,7 @@ class StickyNote(QWidget):
     def _apply_default_style(self):
         """应用硬编码的默认回退样式"""
         default_style = '''
-            StickyNote { background-color: #FFF9C4; }
+            StickyNote { background-color: #FFF9C4; border-radius: 12px; }
             QLineEdit {
                 background-color: #FFFDE7; border: 2px solid #E0D89C;
                 border-radius: 5px; padding: 5px; font-family: "Microsoft YaHei";
@@ -999,13 +2880,17 @@ class StickyNote(QWidget):
                 border-radius: 5px; padding: 5px; font-family: "Microsoft YaHei";
                 color: #333333;
             }
+            StickyNote { background: transparent; background-color: transparent;
+                         border: none; border-radius: 12px; }
         '''
         self.setStyleSheet(default_style)
         self.text_edit.setStyleSheet(default_style)
         self.title_edit.setStyleSheet(default_style)
         is_dark = self.is_dark_theme(default_style)
-        adaptive_styles = self.get_adaptive_control_styles(is_dark)
+        adaptive_styles = self._theme_tokens_from_css(default_style, is_dark)
+        self._current_theme_styles = adaptive_styles
         self.apply_adaptive_control_styles(adaptive_styles)
+        self._refresh_hide_tab_style()
         # md_preview 根据深色/浅色主题设置独立样式
         if hasattr(self, 'md_preview'):
             md_bg = '#2b2b2b' if is_dark else '#FFFFFF'
@@ -1019,7 +2904,7 @@ class StickyNote(QWidget):
                 }}
             ''')
         # 更新边框画笔颜色
-        self._border_pen.setColor(QColor(100, 100, 100) if is_dark else QColor(200, 200, 200))
+        self._border_pen.setColor(QColor(adaptive_styles['border']))
         if hasattr(self, 'font_settings') and self.font_settings:
             self.apply_font()
 
@@ -1045,13 +2930,11 @@ class StickyNote(QWidget):
         font_size = font_settings.get('size', 12)
         font_weight = 'bold' if font_settings.get('bold', False) else 'normal'
         font_style = 'italic' if font_settings.get('italic', False) else 'normal'
-        font_color = getattr(self, 'font_color', '#000000')
         font_style_sheet = f'''
             font-family: "{font_family}" !important;
             font-size: {font_size}pt !important;
             font-weight: {font_weight} !important;
             font-style: {font_style} !important;
-            color: {font_color} !important;
         '''
         self.text_edit.setStyleSheet(self.text_edit.styleSheet() + font_style_sheet)
         self.title_edit.setStyleSheet(self.title_edit.styleSheet() + font_style_sheet)
@@ -1063,7 +2946,6 @@ class StickyNote(QWidget):
 
     def apply_rich_text_format(self):
         font_settings = getattr(self, 'font_settings', {})
-        font_color = getattr(self, 'font_color', '#000000')
         text_char_format = QTextCharFormat()
         if font_settings:
             font = QFont()
@@ -1072,10 +2954,14 @@ class StickyNote(QWidget):
             font.setBold(font_settings.get('bold', False))
             font.setItalic(font_settings.get('italic', False))
             text_char_format.setFont(font)
-        text_char_format.setForeground(QColor(font_color))
+        if self.font_color_mode == 'manual':
+            text_char_format.setForeground(QColor(self.font_color))
         self.text_edit.setCurrentCharFormat(text_char_format)
         title_palette = self.title_edit.palette()
-        title_palette.setColor(QPalette.Text, QColor(font_color))
+        effective_title_color = getattr(self, '_current_theme_styles', {}).get(
+            'title_text', '#333333'
+        )
+        title_palette.setColor(QPalette.Text, QColor(effective_title_color))
         self.title_edit.setPalette(title_palette)
 
     # ==================== 数据持久化 ====================
@@ -1111,10 +2997,15 @@ class StickyNote(QWidget):
             'favorite': False,
             'geometry': None,
             'theme': "soft_yellow.css",
+            'background_image': '',
+            'control_opacity': 1.0,
+            'background_text_color': '',
+            'background_control_color': '',
             'title_font_size': 12,
             'content_font_size': 12,
             'auto_format_enabled': True,
             'font_color': '#000000',
+            'font_color_mode': 'theme',
             'advanced_toolbar_visible': False,
             'edit_mode': 'richtext',
             'markdown_content': ''
@@ -1147,6 +3038,12 @@ class StickyNote(QWidget):
         self.note_data['opacity'] = self.windowOpacity()
         self.note_data['always_on_top'] = self.topmost_checkbox.isChecked()
         self.note_data['theme'] = self.theme
+        self.note_data['background_image'] = self.background_image
+        self.note_data['control_opacity'] = self.control_opacity
+        self.note_data['background_text_color'] = self.background_text_color
+        self.note_data['background_control_color'] = self.background_control_color
+        self.note_data['font_color'] = self.font_color
+        self.note_data['font_color_mode'] = self.font_color_mode
         if hasattr(self, 'title_font_size'):
             self.note_data['title_font_size'] = self.title_font_size
         if hasattr(self, 'content_font_size'):
@@ -1432,7 +3329,15 @@ class StickyNote(QWidget):
         """切换便签锁定状态"""
         self.is_locked = not self.is_locked
         self.note_data['locked'] = self.is_locked
-        self.lock_btn.setText('🔒' if self.is_locked else '🔓')
+        # Keep the icon-led presentation consistent after state changes.  The
+        # accessible name and tooltip carry the text label for assistive tech.
+        self.lock_btn.setText('')
+        self.lock_btn.setIcon(_make_vector_icon(
+            'lock' if self.is_locked else 'unlock', self._current_icon_color(),
+            monochrome=self._has_background_image(),
+        ))
+        self.lock_btn.setIconSize(QSize(19, 19))
+        self.lock_btn.setAccessibleName('解锁便签' if self.is_locked else '锁定便签')
         self.lock_btn.setToolTip('解锁便签' if self.is_locked else '锁定便签')
         self.title_edit.setReadOnly(self.is_locked)
         self.text_edit.setReadOnly(self.is_locked)
@@ -1508,14 +3413,23 @@ class StickyNote(QWidget):
         if not self.manager or not self.manager.reminder_manager:
             return
         info = self.manager.reminder_manager.get_reminder_info(self)
+        self.reminder_btn.setIcon(_make_vector_icon(
+            'bell', self._current_icon_color(),
+            monochrome=self._has_background_image(),
+        ))
+        self.reminder_btn.setIconSize(QSize(19, 19))
+        self.reminder_btn.setText('')
+        self.reminder_btn.setAccessibleName('设置提醒')
         if info['enabled']:
             self.reminder_btn.setToolTip(info['text'])
-            self.reminder_btn.setStyleSheet(
-                'QPushButton { background-color: #007acc; color: white; border-radius: 3px; font-size: 14pt; }'
-            )
+            self.reminder_btn.setProperty('reminderActive', True)
+            self.reminder_btn.style().unpolish(self.reminder_btn)
+            self.reminder_btn.style().polish(self.reminder_btn)
         else:
             self.reminder_btn.setToolTip('设置提醒')
-            self.reminder_btn.setStyleSheet('')
+            self.reminder_btn.setProperty('reminderActive', False)
+            self.reminder_btn.style().unpolish(self.reminder_btn)
+            self.reminder_btn.style().polish(self.reminder_btn)
 
     # ==================== 窗口拖拽和调整大小 ====================
 
@@ -1671,6 +3585,8 @@ class StickyNote(QWidget):
 
     # 触发自动隐藏的屏幕边缘距离阈值（像素）
     AUTO_HIDE_THRESHOLD = 3
+    HIDE_TAB_WIDTH = 144
+    HIDE_TAB_HEIGHT = 34
 
     def _get_screen_geometry(self):
         """获取当前屏幕可用几何区域（1秒缓存）"""
@@ -1743,42 +3659,83 @@ class StickyNote(QWidget):
         if self.hide_tab is not None:
             return
 
-        title = self.note_data.get('title', f'便签 {self.note_id}')
-        short_title = title[:8] + ('…' if len(title) > 8 else '')
+        title = self.title_edit.text().strip() if hasattr(self, 'title_edit') else ''
+        title = title or self.note_data.get('title', f'便签 {self.note_id}')
+        short_title = title[:9] + ('…' if len(title) > 9 else '')
 
         self.hide_tab = QWidget(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.hide_tab.setFixedSize(130, 28)
+        self.hide_tab.setObjectName('hideTab')
+        self.hide_tab.setFixedSize(self.HIDE_TAB_WIDTH, self.HIDE_TAB_HEIGHT)
         self.hide_tab.setMouseTracking(True)
+        self.hide_tab.setAttribute(Qt.WA_StyledBackground, True)
+        self.hide_tab.setCursor(QCursor(Qt.PointingHandCursor))
+        self.hide_tab.setFocusPolicy(Qt.StrongFocus)
+        self.hide_tab.setAccessibleName(f'隐藏便签：{title}，单击展开')
+        self.hide_tab.setToolTip('悬停预览便签，单击后保持展开')
 
-        # 根据主题设置颜色
-        is_dark = getattr(self, '_is_dark_theme', False)
-        bg = '#3a3a3a' if is_dark else '#FFFDE7'
-        fg = '#FFFFFF' if is_dark else '#333333'
-        border = '#555555' if is_dark else '#B0B0B0'
+        # Reuse the resolved semantic theme rather than guessing from a stale
+        # dark-mode flag. The handle remains opaque even when the note uses an
+        # image so it is always discoverable at the screen edge.
+        styles = getattr(self, '_current_theme_styles', {})
+        bg = styles.get('surface', '#FFFDE7')
+        hover_bg = styles.get('surface_alt', bg)
+        border = styles.get('border', '#8A7D22')
+        focus = styles.get('focus', border)
+        accent = styles.get('accent', border)
+        accent_text = _readable_color(styles.get('accent_text'), accent, 4.5)
+        fg = _readable_color(styles.get('text'), bg, 4.5)
 
         self.hide_tab.setStyleSheet(f'''
-            QWidget {{
+            QWidget#hideTab {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 4px;
+                border-radius: 9px;
+            }}
+            QWidget#hideTab:hover, QWidget#hideTab:focus {{
+                background-color: {hover_bg};
+                border: 2px solid {focus};
+            }}
+            QLabel#hideTabIcon {{
+                background-color: {accent};
+                border: none;
+                border-radius: 8px;
+            }}
+            QLabel#hideTabTitle {{
+                color: {fg};
+                background: transparent;
+                border: none;
+                font-size: 9pt;
+                font-weight: 600;
             }}
         ''')
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(5, 4, 8, 4)
+        layout.setSpacing(7)
 
-        # 方向箭头
-        arrow_map = {'left': '▶', 'right': '◀', 'top': '▼', 'bottom': '▲'}
-        arrow = arrow_map.get(self.hidden_edge, '▶')
-
-        arrow_label = QLabel(arrow)
-        arrow_label.setFixedWidth(16)
-        arrow_label.setStyleSheet(f'color: {fg}; font-size: 10pt; border: none;')
-        layout.addWidget(arrow_label)
+        # A stable vector edge/restore glyph replaces the platform-dependent
+        # triangle character shown in the legacy handle.
+        icon_map = {
+            'left': 'edge_right', 'right': 'edge_left',
+            'top': 'edge_down', 'bottom': 'edge_up',
+        }
+        icon_label = QLabel()
+        icon_label.setObjectName('hideTabIcon')
+        icon_label.setFixedSize(24, 24)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        icon_label.setPixmap(
+            _make_vector_icon(
+                icon_map.get(self.hidden_edge, 'edge_right'),
+                accent_text, size=18, monochrome=True,
+            ).pixmap(18, 18)
+        )
+        layout.addWidget(icon_label)
 
         title_label = QLabel(short_title)
-        title_label.setStyleSheet(f'color: {fg}; font-size: 9pt; border: none;')
+        title_label.setObjectName('hideTabTitle')
+        title_label.setToolTip(title)
+        title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(title_label)
         layout.addStretch()
 
@@ -1786,6 +3743,47 @@ class StickyNote(QWidget):
 
         # 安装事件过滤器以检测悬停和点击
         self.hide_tab.installEventFilter(self)
+
+    def _refresh_hide_tab_style(self):
+        """Refresh an existing edge handle after a theme change."""
+        if self.hide_tab is None:
+            return
+        styles = getattr(self, '_current_theme_styles', {})
+        bg = styles.get('surface', '#FFFDE7')
+        hover_bg = styles.get('surface_alt', bg)
+        border = styles.get('border', '#8A7D22')
+        focus = styles.get('focus', border)
+        accent = styles.get('accent', border)
+        accent_text = _readable_color(styles.get('accent_text'), accent, 4.5)
+        fg = _readable_color(styles.get('text'), bg, 4.5)
+        self.hide_tab.setStyleSheet(f'''
+            QWidget#hideTab {{
+                background-color: {bg}; border: 1px solid {border};
+                border-radius: 9px;
+            }}
+            QWidget#hideTab:hover, QWidget#hideTab:focus {{
+                background-color: {hover_bg}; border: 2px solid {focus};
+            }}
+            QLabel#hideTabIcon {{
+                background-color: {accent}; border: none; border-radius: 8px;
+            }}
+            QLabel#hideTabTitle {{
+                color: {fg}; background: transparent; border: none;
+                font-size: 9pt; font-weight: 600;
+            }}
+        ''')
+        icon_label = self.hide_tab.findChild(QLabel, 'hideTabIcon')
+        if icon_label is not None:
+            icon_map = {
+                'left': 'edge_right', 'right': 'edge_left',
+                'top': 'edge_down', 'bottom': 'edge_up',
+            }
+            icon_label.setPixmap(
+                _make_vector_icon(
+                    icon_map.get(self.hidden_edge, 'edge_right'),
+                    accent_text, size=18, monochrome=True,
+                ).pixmap(18, 18)
+            )
 
     def _position_hide_tab(self):
         """根据隐藏边缘计算标签页的屏幕位置"""
@@ -1797,7 +3795,7 @@ class StickyNote(QWidget):
             return
         screen = self._get_screen_geometry()
         pre_geo = self._pre_hide_geometry
-        tab_w, tab_h = 130, 28
+        tab_w, tab_h = self.HIDE_TAB_WIDTH, self.HIDE_TAB_HEIGHT
 
         if self.hidden_edge == 'left':
             x = screen.left()
@@ -1936,12 +3934,20 @@ class StickyNote(QWidget):
                     self._hover_restore_timer.stop()
                 self._restore_from_auto_hide(hover_triggered=False)
                 return True
+            elif event.type() == QEvent.KeyPress and event.key() in (
+                    Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self._restore_from_auto_hide(hover_triggered=False)
+                return True
         return super().eventFilter(obj, event)
 
     def perform_resize(self, global_pos):
         delta = global_pos - self.drag_pos
         geometry = QRect(self.initial_geometry)
-        min_width, min_height = 100, 120
+        # Keep interactive resizing consistent with QWidget's declared
+        # minimum (240x240); the previous hard-coded 100x120 bypassed that
+        # contract and could make the editor/tool rail unreachable.
+        min_width = max(1, self.minimumWidth())
+        min_height = max(1, self.minimumHeight())
         new_x = geometry.x() + delta.x()
         new_y = geometry.y() + delta.y()
         new_width = geometry.width() + delta.x()
@@ -2093,8 +4099,66 @@ class StickyNote(QWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # Clear the backing store explicitly.  This is important for a
+        # translucent top-level widget: a previous rectangular frame must not
+        # survive after a resize or a background-image change.
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        # The exact path is also converted to the native QRegion mask in
+        # ``_update_window_shape``.  Do not maintain separate radii/rectangles
+        # for paint and hit testing.
+        rounded_path = self._rounded_window_path()
+        if rounded_path.isEmpty():
+            painter.end()
+            return
+
+        styles = getattr(self, '_current_theme_styles', {})
+        surface_color = styles.get('canvas', '#FFF9C4')
+        painter.save()
+        painter.setClipPath(rounded_path)
+        painter.fillPath(rounded_path, QBrush(QColor(surface_color)))
+
+        if not self._background_pixmap.isNull():
+            target = self.rect()
+            try:
+                current_dpr = float(self.devicePixelRatioF())
+            except (AttributeError, TypeError, ValueError):
+                current_dpr = 1.0
+            cache_stale = (
+                self._background_scaled_size != target.size() or
+                abs(getattr(self, '_background_scaled_dpr', 1.0) - current_dpr) > 0.01
+            )
+            if cache_stale:
+                source = self._background_pixmap
+                if source.width() > 0 and source.height() > 0:
+                    scale = max(
+                        target.width() / source.width(),
+                        target.height() / source.height(),
+                    )
+                    scaled = source.scaled(
+                        max(1, int(source.width() * scale)),
+                        max(1, int(source.height() * scale)),
+                        Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
+                    )
+                    self._background_scaled_cache = scaled
+                    self._background_scaled_size = target.size()
+                    self._background_scaled_dpr = current_dpr
+            scaled = self._background_scaled_cache
+            if not scaled.isNull():
+                x = max(0, (scaled.width() - target.width()) // 2)
+                y = max(0, (scaled.height() - target.height()) // 2)
+                painter.drawPixmap(
+                    target, scaled,
+                    QRect(x, y, target.width(), target.height()),
+                )
+        painter.restore()
+
         painter.setPen(self._border_pen)
-        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(rounded_path)
 
     # ==================== 右键上下文菜单 ====================
 

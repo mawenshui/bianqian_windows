@@ -6,6 +6,8 @@
 """
 
 import sys
+from copy import deepcopy
+from typing import Mapping
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QAbstractNativeEventFilter
 from PyQt5.QtGui import QKeySequence
@@ -17,7 +19,98 @@ WM_HOTKEY = 0x0312
 import ctypes
 from ctypes import wintypes
 
-user32 = ctypes.windll.user32
+user32 = getattr(getattr(ctypes, 'windll', None), 'user32', None)
+
+
+# Keep the action vocabulary in one place.  Settings UI and the runtime use
+# the same labels/defaults, while unknown ``shortcuts.*`` config keys remain
+# untouched by reconfiguration.
+SHORTCUT_DEFINITIONS = {
+    'add_note': {
+        'label': '新建便签',
+        'default': 'Ctrl+Shift+N',
+        'description': '快速新建便签',
+    },
+    'show_search_dialog': {
+        'label': '搜索便签',
+        'default': 'Ctrl+Shift+F',
+        'description': '打开便签搜索',
+    },
+    'show_backup_dialog': {
+        'label': '备份管理',
+        'default': 'Ctrl+Shift+B',
+        'description': '打开备份管理',
+    },
+    'show_group_view': {
+        'label': '分组视图',
+        'default': 'Ctrl+Shift+G',
+        'description': '打开便签分组视图',
+    },
+}
+
+
+def get_shortcut_definitions():
+    """Return a copy so callers cannot mutate the shared action contract."""
+    return deepcopy(SHORTCUT_DEFINITIONS)
+
+
+def canonical_shortcut(value) -> str:
+    """Return one portable, modifier-bearing Qt shortcut or ``''``.
+
+    Windows ``RegisterHotKey`` needs a real key and at least one modifier.
+    Requiring the same contract before touching the OS gives the settings UI
+    deterministic validation and avoids persisting values Qt cannot register.
+    """
+    if isinstance(value, QKeySequence):
+        sequence = value
+    else:
+        sequence = QKeySequence(str(value or '').strip())
+    if sequence.isEmpty() or sequence.count() != 1:
+        return ''
+    text = sequence.toString(QKeySequence.PortableText).strip()
+    if not text:
+        return ''
+    parts = [part.strip() for part in text.split('+') if part.strip()]
+    if len(parts) < 2:
+        return ''
+    modifiers = {'ctrl', 'shift', 'alt', 'meta', 'win', 'windows'}
+    if not any(part.lower() in modifiers for part in parts[:-1]):
+        return ''
+    if parts[-1].lower() in modifiers:
+        return ''
+    return text
+
+
+def validate_shortcut_map(shortcuts: Mapping[str, object]):
+    """Validate and normalize a mapping before any OS registration occurs."""
+    normalized = {}
+    errors = []
+    seen = {}
+    for action_name, raw_value in shortcuts.items():
+        canonical = canonical_shortcut(raw_value)
+        if not canonical:
+            errors.append({
+                'action': action_name,
+                'combination': str(raw_value or ''),
+                'reason': 'invalid',
+            })
+            continue
+        key = canonical.casefold()
+        if key in seen:
+            errors.append({
+                'action': action_name,
+                'combination': canonical,
+                'reason': 'duplicate',
+                'conflict_with': seen[key],
+            })
+            continue
+        seen[key] = action_name
+        normalized[action_name] = canonical
+    return {
+        'ok': not errors,
+        'normalized': normalized,
+        'errors': errors,
+    }
 
 
 class HotkeyNativeEventFilter(QAbstractNativeEventFilter):
@@ -94,6 +187,8 @@ class GlobalShortcutManager(QObject):
         self.shortcuts = {}  # 存储注册的快捷键
         self.hotkey_id = 1  # 热键ID计数器
         self.native_filter = None  # 原生消息过滤器
+        self.last_error = ''
+        self.last_errors = []
         
         if WINDOWS_AVAILABLE:
             # 安装原生消息过滤器来捕获 WM_HOTKEY 消息
@@ -128,15 +223,29 @@ class GlobalShortcutManager(QObject):
         Returns:
             bool: 注册是否成功
         """
+        self.last_error = ''
+        canonical = canonical_shortcut(key_combination)
+        if not canonical:
+            self.last_error = 'invalid'
+            print(f"无法注册快捷键 {key_combination}: 无效的快捷键组合")
+            return False
+        for shortcut_info in self.shortcuts.values():
+            if (shortcut_info.get('combination', '').casefold() == canonical.casefold()
+                    and shortcut_info.get('action') != action_name):
+                self.last_error = 'duplicate'
+                print(f"无法注册快捷键 {canonical}: 与其他动作冲突")
+                return False
         if not WINDOWS_AVAILABLE:
+            self.last_error = 'windows_unavailable'
             print(f"无法注册快捷键 {key_combination}: Windows API 不可用")
             return False
         
         try:
             # 解析快捷键组合
-            modifiers, key_code = self.parse_key_combination(key_combination)
+            modifiers, key_code = self.parse_key_combination(canonical)
             
             if modifiers is None or key_code is None:
+                self.last_error = 'invalid'
                 print(f"无法解析快捷键组合: {key_combination}")
                 return False
             
@@ -147,12 +256,18 @@ class GlobalShortcutManager(QObject):
                 )
             except pywintypes.error as e:
                 # 热键已被其他程序占用（常见于旧实例仍在托盘运行）
+                self.last_error = 'system_conflict'
                 print(f"⚠ 快捷键 '{key_combination}' 无法注册 — 可能已被其他程序占用，应用将不依赖此快捷键运行")
                 return False
 
-            if success:
+            # pywin32 mirrors the Win32 void-style wrapper here: successful
+            # RegisterHotKey calls return ``None`` and failures raise
+            # ``pywintypes.error``.  Only an explicit False from an alternate
+            # wrapper is a failure; treating None as false was the original
+            # reason every configured shortcut appeared inactive.
+            if success is not False:
                 self.shortcuts[self.hotkey_id] = {
-                    'combination': key_combination,
+                    'combination': canonical,
                     'action': action_name,
                     'modifiers': modifiers,
                     'key_code': key_code
@@ -161,13 +276,87 @@ class GlobalShortcutManager(QObject):
                 self.hotkey_id += 1
                 return True
             else:
+                self.last_error = 'registration_failed'
                 print(f"注册快捷键失败: {key_combination}")
                 return False
                 
         except Exception as e:
+            self.last_error = 'registration_error'
             print(f"注册快捷键时出错: {e}")
             return False
     
+    def clear_shortcuts(self):
+        """Unregister every native shortcut while keeping the manager reusable."""
+        self.last_errors = []
+        if not WINDOWS_AVAILABLE:
+            self.shortcuts.clear()
+            return True
+        for hotkey_id in list(self.shortcuts.keys()):
+            try:
+                if UnregisterHotKey is not None:
+                    UnregisterHotKey(None, hotkey_id)
+            except Exception as exc:
+                self.last_errors.append({
+                    'action': self.shortcuts.get(hotkey_id, {}).get('action', ''),
+                    'reason': 'unregister_failed',
+                    'error': str(exc),
+                })
+        self.shortcuts.clear()
+        return not self.last_errors
+
+    def replace_shortcuts(self, shortcuts: Mapping[str, object]):
+        """Atomically replace native registrations from an action->combo map."""
+        validation = validate_shortcut_map(shortcuts)
+        if not validation['ok']:
+            self.last_errors = list(validation['errors'])
+            self.last_error = validation['errors'][0]['reason']
+            return {
+                'ok': False,
+                'registered': {},
+                'errors': list(validation['errors']),
+            }
+
+        previous = {
+            info.get('action'): info.get('combination')
+            for info in self.shortcuts.values()
+            if info.get('action')
+        }
+        self.clear_shortcuts()
+        self.last_errors = []
+        registered = {}
+        errors = []
+        for action_name, combination in validation['normalized'].items():
+            if self.register_shortcut(combination, action_name):
+                registered[action_name] = combination
+            else:
+                errors.append({
+                    'action': action_name,
+                    'combination': combination,
+                    'reason': self.last_error or 'registration_failed',
+                })
+                break
+
+        if errors:
+            # Do not leave a partially active configuration. Restore the
+            # previous map when the OS still permits it; otherwise remain empty.
+            self.clear_shortcuts()
+            if previous:
+                for action_name, combination in previous.items():
+                    self.register_shortcut(combination, action_name)
+            self.last_errors = errors
+            self.last_error = errors[0]['reason']
+            return {'ok': False, 'registered': {}, 'errors': errors}
+        self.last_errors = []
+        self.last_error = ''
+        return {'ok': True, 'registered': registered, 'errors': []}
+
+    def get_registered_shortcuts(self):
+        return {
+            info.get('action'): info.get('combination')
+            for info in self.shortcuts.values()
+            if info.get('action')
+        }
+
     def unregister_shortcut(self, action_name):
         """
         注销快捷键
@@ -212,11 +401,12 @@ class GlobalShortcutManager(QObject):
         Returns:
             tuple: (modifiers, key_code) 或 (None, None)
         """
-        if not WINDOWS_AVAILABLE:
+        canonical = canonical_shortcut(combination)
+        if not canonical or not WINDOWS_AVAILABLE:
             return None, None
         
         try:
-            parts = combination.split('+')
+            parts = canonical.split('+')
             modifiers = 0
             key_code = None
             
@@ -230,6 +420,8 @@ class GlobalShortcutManager(QObject):
                 elif part == 'shift':
                     modifiers |= win32con.MOD_SHIFT
                 elif part == 'win':
+                    modifiers |= win32con.MOD_WIN
+                elif part in ('meta', 'windows'):
                     modifiers |= win32con.MOD_WIN
                 else:
                     # 这是主键
@@ -267,11 +459,14 @@ class GlobalShortcutManager(QObject):
             'f7': win32con.VK_F7, 'f8': win32con.VK_F8, 'f9': win32con.VK_F9,
             'f10': win32con.VK_F10, 'f11': win32con.VK_F11, 'f12': win32con.VK_F12,
             'space': win32con.VK_SPACE, 'enter': win32con.VK_RETURN,
-            'escape': win32con.VK_ESCAPE, 'tab': win32con.VK_TAB,
+            'return': win32con.VK_RETURN, 'escape': win32con.VK_ESCAPE,
+            'esc': win32con.VK_ESCAPE, 'tab': win32con.VK_TAB,
             'backspace': win32con.VK_BACK, 'delete': win32con.VK_DELETE,
-            'insert': win32con.VK_INSERT, 'home': win32con.VK_HOME,
+            'del': win32con.VK_DELETE, 'insert': win32con.VK_INSERT,
+            'ins': win32con.VK_INSERT, 'home': win32con.VK_HOME,
             'end': win32con.VK_END, 'pageup': win32con.VK_PRIOR,
-            'pagedown': win32con.VK_NEXT, 'up': win32con.VK_UP,
+            'pgup': win32con.VK_PRIOR, 'pagedown': win32con.VK_NEXT,
+            'pgdn': win32con.VK_NEXT, 'up': win32con.VK_UP,
             'down': win32con.VK_DOWN, 'left': win32con.VK_LEFT,
             'right': win32con.VK_RIGHT
         }
@@ -295,10 +490,7 @@ class GlobalShortcutManager(QObject):
                 self.native_filter = None
             
             # 注销所有热键
-            for hotkey_id in list(self.shortcuts.keys()):
-                UnregisterHotKey(None, hotkey_id)
-            
-            self.shortcuts.clear()
+            self.clear_shortcuts()
             print("已清理所有全局快捷键")
             
         except Exception as e:
@@ -433,6 +625,7 @@ class ShortcutManager(QObject):
         super().__init__(parent)
         self.global_manager = GlobalShortcutManager(self)
         self.local_manager = LocalShortcutManager(self)
+        self.last_report = None
         
         # 连接信号
         self.global_manager.shortcut_activated.connect(self.shortcut_activated)
@@ -450,6 +643,14 @@ class ShortcutManager(QObject):
             bool: 注册是否成功
         """
         return self.global_manager.register_shortcut(key_combination, action_name)
+
+    def replace_global_shortcuts(self, shortcuts: Mapping[str, object]):
+        """Replace all global registrations and return structured diagnostics."""
+        self.last_report = self.global_manager.replace_shortcuts(shortcuts)
+        return self.last_report
+
+    def get_registered_global_shortcuts(self):
+        return self.global_manager.get_registered_shortcuts()
     
     def register_local_shortcut(self, key_combination, action_name):
         """

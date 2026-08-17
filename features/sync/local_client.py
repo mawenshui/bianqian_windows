@@ -40,6 +40,10 @@ class LocalSyncClient:
             logger.error(f'复制到同步目录失败: {filename} - {e}')
             return False
 
+    def upload_file(self, local_path: str, filename: str) -> bool:
+        """SyncEngine-compatible alias for copying a local note outward."""
+        return self.copy_to_sync(local_path, filename)
+
     def copy_from_sync(self, filename: str, local_path: str) -> bool:
         """从同步目录复制到本地"""
         try:
@@ -49,6 +53,10 @@ class LocalSyncClient:
         except Exception as e:
             logger.error(f'从同步目录复制失败: {filename} - {e}')
             return False
+
+    def download_file(self, filename: str, local_path: str) -> bool:
+        """SyncEngine-compatible alias for restoring a note locally."""
+        return self.copy_from_sync(filename, local_path)
 
     def delete_from_sync(self, filename: str) -> bool:
         """从同步目录删除文件"""
@@ -60,6 +68,10 @@ class LocalSyncClient:
         except Exception as e:
             logger.error(f'从同步目录删除失败: {filename} - {e}')
             return False
+
+    def delete_file(self, filename: str) -> bool:
+        """SyncEngine-compatible alias for deleting a mirrored note."""
+        return self.delete_from_sync(filename)
 
     def get_file_hash(self, filename: str) -> str:
         """获取同步目录中文件的哈希"""

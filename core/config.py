@@ -17,6 +17,7 @@ from typing import Any, Optional, Dict
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from core import get_user_data_dir
+from core.ui_preferences import DEFAULT_SETTINGS_TOOL_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         'enabled': True,
         'disabled': [],
         'configs': {},
+    },
+    'ui': {
+        'settings_tool_order': list(DEFAULT_SETTINGS_TOOL_ORDER),
     },
 }
 
