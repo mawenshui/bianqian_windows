@@ -75,7 +75,7 @@ class StickyNoteManager:
         self.app.setQuitOnLastWindowClosed(False)
 
         # 设置应用图标
-        icon_path = os.path.join(get_project_root(), 'icon.png')
+        icon_path = os.path.join(get_project_root(), 'assets', 'icons', 'icon.png')
         if not os.path.exists(icon_path):
             self.icon = self.app.style().standardIcon(QStyle.SP_DesktopIcon)
         else:

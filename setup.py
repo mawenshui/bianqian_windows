@@ -8,17 +8,25 @@ from cx_Freeze import setup, Executable
 
 # 项目根目录
 project_dir = os.path.dirname(os.path.abspath(__file__))
+assets_dir = os.path.join(project_dir, 'assets')
+artifacts_dir = os.path.join(project_dir, 'artifacts')
+icon_png = os.path.join(assets_dir, 'icons', 'icon.png')
+icon_ico = os.path.join(assets_dir, 'icons', 'icon.ico')
+metadata_dir = os.path.join(artifacts_dir, 'build', 'metadata')
+staging_dir = os.path.join(artifacts_dir, 'build', 'staging')
+os.makedirs(metadata_dir, exist_ok=True)
 
 # 需要包含的数据文件
 include_files = [
     (os.path.join(project_dir, 'styles'), 'styles'),
     (os.path.join(project_dir, 'plugins'), 'plugins'),
+    (assets_dir, 'assets'),
     (os.path.join(project_dir, 'readme.md'), 'readme.md'),
 ]
 
 # 构建选项
 build_exe_options = {
-    'build_exe': 'dist/StickyNote',
+    'build_exe': os.path.join(artifacts_dir, 'build', 'StickyNote'),
     'packages': [
         'PyQt5', 'pywintypes', 'win32api', 'win32con', 'win32gui', 'win32crypt',
         'cryptography', 'argon2', 'markdown', 'pygments',
@@ -42,6 +50,7 @@ build_exe_options = {
 
 # MSI 安装包选项
 bdist_msi_options = {
+    'dist_dir': os.path.join(artifacts_dir, 'dist'),
     'add_to_path': False,
     'upgrade_code': '{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}',
     'initial_target_dir': r'[ProgramFilesFolder]',
@@ -50,7 +59,7 @@ bdist_msi_options = {
         'comments': '桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
         'keywords': 'sticky,note,便签,桌面',
     },
-    'install_icon': os.path.join(project_dir, 'icon.png') if os.path.exists(os.path.join(project_dir, 'icon.png')) else None,
+    'install_icon': icon_ico if os.path.exists(icon_ico) else None,
     # 安装完成后显示"立即运行"复选框
     'launch_on_finish': True,
     # 自定义 MSI 表数据
@@ -143,16 +152,18 @@ executables = [
         os.path.join(project_dir, 'main.py'),
         base='gui' if sys.platform == 'win32' else None,
         target_name='StickyNote.exe',
-        icon=os.path.join(project_dir, 'icon.png') if os.path.exists(os.path.join(project_dir, 'icon.png')) else None,
+        icon=icon_ico if os.path.exists(icon_ico) else None,
     )
 ]
 
 setup(
     name='StickyNote',
-    version='1.7.7',
+    version='1.7.8',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={
+        'egg_info': {'egg_base': metadata_dir},
+        'build': {'build_base': staging_dir},
         'build_exe': build_exe_options,
         'bdist_msi': bdist_msi_options,
     },

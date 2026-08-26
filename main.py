@@ -156,8 +156,7 @@ def _perform_reset(mode: int, config) -> bool:
                 pass
 
         # 3. 删除备份文件
-        from core import get_project_root
-        backups_dir = os.path.join(get_project_root(), 'backups')
+        backups_dir = os.path.join(get_user_data_dir(), 'backups')
         if os.path.exists(backups_dir):
             try:
                 shutil.rmtree(backups_dir)

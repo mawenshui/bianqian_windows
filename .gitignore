@@ -2,8 +2,10 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+.venv/
 
-# 构建产物（EXE/MSI 通过 GitHub Release 发布）
+# 旧版根目录构建产物（兼容未迁移的本地环境）
 build/
 dist/
 
@@ -12,6 +14,12 @@ notes/
 backups/
 settings.json
 window_positions.json
+tags.json
+templates/
+logs/
+
+# 开发模式运行数据统一目录
+runtime/
 
 # 测试相关
 .benchmarks/
@@ -23,14 +31,15 @@ test_artifacts_ui_*/
 portable_build_*/
 release_build_*/
 
+# 统一构建、发布、归档和测试产物目录，仅保留说明文件
+artifacts/*
+!artifacts/README.md
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# cx_Freeze 构建临时目录
-dist/
 
 # PyInstaller
 *.spec

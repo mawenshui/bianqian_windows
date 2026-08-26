@@ -5,9 +5,27 @@ MSI 后处理：
 2. 中文化界面文本 + ProductLanguage
 """
 import msilib
+import os
 import sys
 
-MSI_PATH = sys.argv[1] if len(sys.argv) > 1 else r'dist\StickyNote-1.6.1-win64.msi'
+
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, 'reconfigure', None)
+    if _reconfigure:
+        _reconfigure(encoding='utf-8')
+
+
+def _resolve_msi_path(argv):
+    """解析并校验要修补的 MSI 路径，禁止退回旧版硬编码文件。"""
+    if len(argv) != 2:
+        raise SystemExit('用法: python tools/release/patch_msi.py <MSI文件路径>')
+    path = os.path.abspath(argv[1])
+    if not os.path.isfile(path):
+        raise SystemExit(f'MSI 文件不存在: {path}')
+    return path
+
+
+MSI_PATH = _resolve_msi_path(sys.argv)
 
 # ── 中文覆写表：{(Dialog_, Control): 新文本} ──
 OVERRIDES = {

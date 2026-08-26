@@ -14,10 +14,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-from core import get_project_root
+from core import get_user_data_dir
 
-# 日志文件路径 — 始终放在软件所在目录的 logs/ 下
-LOG_DIR = os.path.join(get_project_root(), 'logs')
+# 日志文件路径 — 与其他用户数据统一放在用户数据目录的 logs/ 下
+LOG_DIR = os.path.join(get_user_data_dir(), 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'sticky_note.log')
 
 # 日志格式

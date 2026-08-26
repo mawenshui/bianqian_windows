@@ -344,7 +344,7 @@ class TestSettingsDialogUI(unittest.TestCase):
         self.assertIsInstance(page, QScrollArea)
         self.dialog.show_inline_update_info(
             {'version': '9.9.9', 'tag': 'v9.9.9', 'body': '\n'.join(['更新说明'] * 20)},
-            '1.7.7',
+            '1.7.8',
         )
         self.dialog.resize(self.dialog.minimumSize())
         self.app.processEvents()

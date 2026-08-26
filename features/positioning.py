@@ -14,6 +14,8 @@ from PyQt5.QtWidgets import QApplication, QDesktopWidget
 from PyQt5.QtCore import QRect, QPoint, QSize
 from PyQt5.QtGui import QScreen
 
+from core import get_user_data_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +43,9 @@ class WindowPositionManager:
         self.occupied_positions = set()
         
         # 位置历史文件
-        self.position_history_file = os.path.join(os.getcwd(), 'window_positions.json')
+        self.position_history_file = os.path.join(
+            get_user_data_dir(), 'window_positions.json'
+        )
         
         # 加载位置历史
         self.position_history = self.load_position_history()

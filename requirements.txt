@@ -18,3 +18,7 @@ webdavclient3>=3.14
 pytest>=8.0
 pytest-qt>=4.4
 pytest-cov>=5.0
+
+# Windows 构建依赖
+cx-Freeze>=8.7
+Pillow>=12.0

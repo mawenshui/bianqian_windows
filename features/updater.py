@@ -26,8 +26,6 @@ from PyQt5.QtWidgets import (
     QPushButton, QTextEdit, QProgressBar
 )
 
-from core import get_project_root
-
 # ==================== 常量 ====================
 
 GITHUB_REPO = 'mawenshui/bianqian_windows'
@@ -675,6 +673,18 @@ exit /b 1
     return bat_content
 
 
+def get_update_target_dir():
+    """返回当前安装类型对应的更新目标目录。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    build_dir = os.path.join(project_root, 'artifacts', 'build', 'StickyNote')
+    if os.path.isdir(build_dir):
+        return build_dir
+    return os.path.dirname(sys.executable)
+
+
 def execute_update(manager, zip_file_path, install_type, msi_path=None):
     """
     执行更新流程最后一步：保存窗口位置 → 生成 .bat 脚本 → 启动脚本并退出应用。
@@ -696,13 +706,7 @@ def execute_update(manager, zip_file_path, install_type, msi_path=None):
     pid = os.getpid()
 
     # 确定目标 exe 目录
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-    else:
-        # 开发模式：使用项目根目录下的 dist/StickyNote（如果存在）
-        exe_dir = os.path.join(get_project_root(), 'dist', 'StickyNote')
-        if not os.path.isdir(exe_dir):
-            exe_dir = os.path.dirname(sys.executable)
+    exe_dir = get_update_target_dir()
 
     # 生成 .bat 脚本
     bat_script = generate_bat_script(pid, zip_file_path, exe_dir, install_type, msi_path)

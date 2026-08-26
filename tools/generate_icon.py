@@ -123,12 +123,14 @@ def create_icon(size=256):
 
 def main():
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    icons_dir = os.path.join(project_dir, 'assets', 'icons')
+    os.makedirs(icons_dir, exist_ok=True)
     
     # 生成 256x256 的图标
     icon = create_icon(256)
     
     # 保存 PNG（Qt 使用）
-    png_path = os.path.join(project_dir, 'icon.png')
+    png_path = os.path.join(icons_dir, 'icon.png')
     icon.save(png_path, 'PNG')
     print(f'✅ 已生成 PNG 图标: {png_path}')
     
@@ -138,7 +140,7 @@ def main():
     for s in sizes:
         icons.append(create_icon(s))
     
-    ico_path = os.path.join(project_dir, 'icon.ico')
+    ico_path = os.path.join(icons_dir, 'icon.ico')
     icons[0].save(ico_path, 'ICO', sizes=[(s, s) for s in sizes], append_images=icons[1:])
     print(f'✅ 已生成 ICO 图标: {ico_path} (含 {",".join(str(s) for s in sizes)} 尺寸)')
     

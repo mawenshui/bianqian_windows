@@ -25,6 +25,7 @@ from features.updater import (
     parse_version,
     get_download_urls,
     detect_install_type,
+    get_update_target_dir,
     UpdateChecker,
     UpdateDownloader,
     GITHUB_DOWNLOAD_TIMEOUT,
@@ -32,6 +33,17 @@ from features.updater import (
     DOWNLOAD_SOURCES,
     DOWNLOAD_CHUNK_SIZE,
 )
+
+
+class TestUpdateTargetDirectory(unittest.TestCase):
+    @patch('features.updater.os.path.isdir', return_value=True)
+    @patch('features.updater.os.path.abspath', return_value=r'C:\repo\StickyNote\features\updater.py')
+    def test_development_build_uses_artifacts_directory(self, _mock_abspath, _mock_isdir):
+        with patch.object(sys, 'frozen', False, create=True):
+            self.assertEqual(
+                get_update_target_dir(),
+                os.path.join(r'C:\repo\StickyNote', 'artifacts', 'build', 'StickyNote'),
+            )
 
 
 class TestParseVersion(unittest.TestCase):
