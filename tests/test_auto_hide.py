@@ -606,6 +606,91 @@ class TestHideTabPositioning(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_multiple_edge_tabs_do_not_overlap_on_any_side(self):
+        """相同位置的便签贴到同一边时，每个箭头都必须可见可点击。"""
+        for edge in ('left', 'right', 'top', 'bottom'):
+            with self.subTest(edge=edge):
+                temp_dir = tempfile.mkdtemp()
+                notes = []
+                try:
+                    for _ in range(3):
+                        note = self._create_note(temp_dir)
+                        note.resize(400, 300)
+                        note.move(200, 200)
+                        note.auto_hidden = True
+                        note.hidden_edge = edge
+                        note._pre_hide_geometry = note.geometry()
+                        notes.append(note)
+                    screen = QRect(0, 0, 1920, 1080)
+                    for note in notes:
+                        with patch.object(note, '_get_screen_geometry', return_value=screen):
+                            note._create_hide_tab()
+                            note.hide_tab.show()
+                    QApplication.processEvents()
+                    for index, note in enumerate(notes):
+                        for other in notes[index + 1:]:
+                            self.assertFalse(
+                                note.hide_tab.geometry().intersects(other.hide_tab.geometry())
+                            )
+                finally:
+                    for note in notes:
+                        note.is_deleted = True
+                        note.close()
+                    shutil.rmtree(temp_dir)
+
+    def test_event_filter_is_safe_during_note_construction(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            hide_tab = note.hide_tab
+            del note.hide_tab
+            try:
+                note.eventFilter(note, QEvent(QEvent.Enter))
+            finally:
+                note.hide_tab = hide_tab
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_preview_arrow_reserves_full_width_and_dense_tabs_use_next_row(self):
+        temp_dir = tempfile.mkdtemp()
+        notes = []
+        try:
+            screen = QRect(0, 0, 320, 150)
+            for _ in range(3):
+                note = self._create_note(temp_dir)
+                note.resize(240, 240)
+                note.move(40, 0)
+                note.auto_hidden = True
+                note.hidden_edge = 'top'
+                note._pre_hide_geometry = note.geometry()
+                notes.append(note)
+            first = notes[0]
+            with patch.object(first, '_get_screen_geometry', return_value=screen):
+                first._create_hide_tab()
+                first.hide_tab.show()
+                first._set_hide_tab_preview_mode(True)
+            for note in notes[1:]:
+                with patch.object(note, '_get_screen_geometry', return_value=screen):
+                    note._create_hide_tab()
+                    note.hide_tab.show()
+            QApplication.processEvents()
+            self.assertGreaterEqual(notes[2].hide_tab.property('edgeLayer'), 1)
+            self.assertEqual(notes[0].hide_tab.width(), notes[0].PREVIEW_TAB_WIDTH)
+            with patch.object(notes[0], '_get_screen_geometry', return_value=screen):
+                notes[0]._set_hide_tab_preview_mode(False)
+            for index, note in enumerate(notes):
+                for other in notes[index + 1:]:
+                    self.assertFalse(
+                        note.hide_tab.geometry().intersects(other.hide_tab.geometry())
+                    )
+        finally:
+            for note in notes:
+                note.is_deleted = True
+                note.close()
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -721,6 +721,7 @@ class StickyNote(QWidget):
         # 屏幕几何缓存
         self._screen_geo_cache = None
         self._screen_geo_cache_time = 0
+        self._screen_geo_cache_number = None
 
         self.initUI()
 
@@ -3608,6 +3609,7 @@ class StickyNote(QWidget):
     HIDE_TAB_WIDTH = 144
     HIDE_TAB_HEIGHT = 34
     PREVIEW_TAB_WIDTH = 38
+    HIDE_TAB_GAP = 4
 
     def set_hover_preview_enabled(self, enabled):
         """即时切换贴边标签交互，不改变便签的展开或隐藏状态。"""
@@ -3640,15 +3642,21 @@ class StickyNote(QWidget):
 
     def _get_screen_geometry(self):
         """获取当前屏幕可用几何区域（1秒缓存）"""
-        now = time.time()
-        if self._screen_geo_cache is not None and (now - self._screen_geo_cache_time) < 1.0:
-            return self._screen_geo_cache
         desktop = QApplication.desktop()
-        if desktop:
-            self._screen_geo_cache = desktop.availableGeometry(self)
-            self._screen_geo_cache_time = now
+        if not desktop:
+            return None
+        reference = (self._pre_hide_geometry.center()
+                     if self._pre_hide_geometry is not None else self.geometry().center())
+        screen_number = desktop.screenNumber(reference)
+        now = time.time()
+        if (self._screen_geo_cache is not None
+                and self._screen_geo_cache_number == screen_number
+                and (now - self._screen_geo_cache_time) < 1.0):
             return self._screen_geo_cache
-        return None
+        self._screen_geo_cache = desktop.availableGeometry(screen_number)
+        self._screen_geo_cache_time = now
+        self._screen_geo_cache_number = screen_number
+        return self._screen_geo_cache
 
     def _check_auto_hide(self):
         """
@@ -3876,8 +3884,8 @@ class StickyNote(QWidget):
             )
 
     def _position_hide_tab(self):
-        """根据隐藏边缘计算标签页的屏幕位置"""
-        if self.hide_tab is None:
+        """在同一屏幕边缘为标签页寻找不与现有标签重叠的位置。"""
+        if self.hide_tab is None or self._pre_hide_geometry is None:
             return
 
         desktop = QApplication.desktop()
@@ -3886,25 +3894,85 @@ class StickyNote(QWidget):
         screen = self._get_screen_geometry()
         pre_geo = self._pre_hide_geometry
         tab_w, tab_h = self.hide_tab.width(), self.hide_tab.height()
+        vertical_edge = self.hidden_edge in ('left', 'right')
+        # 预览时箭头会变窄，仍为它保留完整标签宽度，以免收起时挤到邻居。
+        span = self.HIDE_TAB_HEIGHT if vertical_edge else self.HIDE_TAB_WIDTH
+        low = screen.top() if vertical_edge else screen.left()
+        high = screen.bottom() if vertical_edge else screen.right()
+        preferred = (pre_geo.top() + (pre_geo.height() - span) // 2
+                     if vertical_edge else
+                     pre_geo.left() + (pre_geo.width() - span) // 2)
+        depth = self.HIDE_TAB_WIDTH if vertical_edge else self.HIDE_TAB_HEIGHT
+        cross_span = screen.width() if vertical_edge else screen.height()
+        max_layers = max(1, (cross_span + self.HIDE_TAB_GAP) //
+                         (depth + self.HIDE_TAB_GAP))
+        slot = None
+        layer = 0
+        for candidate_layer in range(max_layers):
+            occupied = []
+            for other in QApplication.topLevelWidgets():
+                if (other is self.hide_tab or not other.isVisible()
+                        or other.objectName() != 'hideTab'
+                        or other.property('edgeSide') != self.hidden_edge
+                        or other.property('edgeScreen') != screen
+                        or other.property('edgeLayer') != candidate_layer):
+                    continue
+                other_start = other.property('edgeSlotStart')
+                if other_start is not None:
+                    occupied.append((int(other_start), int(other_start) + span))
+            old_slot = self.hide_tab.property('edgeSlotStart')
+            old_layer = self.hide_tab.property('edgeLayer')
+            if (old_slot is not None and old_layer == candidate_layer
+                    and self.hide_tab.property('edgeScreen') == screen
+                    and low <= int(old_slot) <= high - span
+                    and all(int(old_slot) + span + self.HIDE_TAB_GAP <= start
+                            or int(old_slot) >= end + self.HIDE_TAB_GAP
+                            for start, end in occupied)):
+                slot = int(old_slot)
+            else:
+                slot = self._nearest_free_edge_slot(
+                    preferred, span, low, high, occupied, self.HIDE_TAB_GAP)
+            if slot is not None:
+                layer = candidate_layer
+                break
+        if slot is None:
+            logger.warning('屏幕边缘没有足够空间显示更多便签标签页')
+            slot = max(low, min(preferred, high - span))
 
         if self.hidden_edge == 'left':
-            x = screen.left()
-            y = pre_geo.top() + (pre_geo.height() - tab_h) // 2
+            x = screen.left() + layer * (depth + self.HIDE_TAB_GAP)
+            y = slot
         elif self.hidden_edge == 'right':
-            x = screen.right() - tab_w
-            y = pre_geo.top() + (pre_geo.height() - tab_h) // 2
+            x = screen.right() - tab_w - layer * (depth + self.HIDE_TAB_GAP)
+            y = slot
         elif self.hidden_edge == 'top':
-            x = pre_geo.left() + (pre_geo.width() - tab_w) // 2
-            y = screen.top()
-        else:  # bottom
-            x = pre_geo.left() + (pre_geo.width() - tab_w) // 2
-            y = screen.bottom() - tab_h
+            x = slot + (span - tab_w) // 2
+            y = screen.top() + layer * (depth + self.HIDE_TAB_GAP)
+        else:
+            x = slot + (span - tab_w) // 2
+            y = screen.bottom() - tab_h - layer * (depth + self.HIDE_TAB_GAP)
 
-        # 确保标签页在屏幕可视范围内
-        x = max(screen.left(), min(x, screen.right() - tab_w))
-        y = max(screen.top(), min(y, screen.bottom() - tab_h))
-
+        self.hide_tab.setProperty('edgeSide', self.hidden_edge)
+        self.hide_tab.setProperty('edgeScreen', screen)
+        self.hide_tab.setProperty('edgeLayer', layer)
+        self.hide_tab.setProperty('edgeSlotStart', slot)
         self.hide_tab.move(x, y)
+
+    @staticmethod
+    def _nearest_free_edge_slot(preferred, span, low, high, occupied, gap):
+        """返回距离原便签最近、同时不碰到已有标签的起点。"""
+        if high - low < span:
+            return None
+        candidates = []
+        cursor = low
+        for start, end in sorted(occupied):
+            left = min(high - span, start - gap - span)
+            if cursor <= left:
+                candidates.append(max(cursor, min(preferred, left)))
+            cursor = max(cursor, end + gap)
+        if cursor <= high - span:
+            candidates.append(max(cursor, min(preferred, high - span)))
+        return min(candidates, key=lambda value: (abs(value - preferred), value)) if candidates else None
 
     def _slide_out_animation(self, edge):
         """便签主窗口滑出屏幕的动画（完全移出屏幕，不残留任何像素）"""
@@ -4028,7 +4096,10 @@ class StickyNote(QWidget):
         
         新版悬停非箭头区域预览、点击箭头固定；旧版整条标签页可悬停或点击。
         """
-        if obj == self.hide_tab and self.auto_hidden:
+        # Qt can dispatch child events while the note constructor is still
+        # running, before hide_tab has been assigned.
+        hide_tab = getattr(self, 'hide_tab', None)
+        if hide_tab is not None and obj is hide_tab and self.auto_hidden:
             if event.type() == QEvent.Enter:
                 self._update_hide_tab_hover(self.hide_tab.mapFromGlobal(QCursor.pos()))
             elif event.type() == QEvent.MouseMove:
@@ -4046,7 +4117,8 @@ class StickyNote(QWidget):
                     Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
                 self._restore_from_auto_hide(hover_triggered=False)
                 return True
-        elif obj == self.hide_tab and self._hover_restored and self.hover_preview_enabled:
+        elif (hide_tab is not None and obj is hide_tab
+              and self._hover_restored and self.hover_preview_enabled):
             if (event.type() == QEvent.MouseButtonPress
                     and event.button() == Qt.LeftButton
                     and self._is_hide_tab_arrow_pos(event.pos())):

@@ -10,5 +10,5 @@ StickyNote 功能模块
 - updater: 自动更新功能
 """
 
-__version__ = '1.7.9'
+__version__ = '1.7.10'
 __author__ = 'MaWenshui'
