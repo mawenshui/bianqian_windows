@@ -632,6 +632,10 @@ class StickyNote(QWidget):
         self.note_id = note_id
         self.manager = manager
         self.is_deleted = False
+        preview_setting = getattr(manager, 'get_hover_preview_enabled', None)
+        self.hover_preview_enabled = (
+            bool(preview_setting()) if callable(preview_setting) else True
+        )
 
         self.notes_dir = os.path.realpath(os.path.abspath(notes_dir))
         os.makedirs(self.notes_dir, exist_ok=True)
@@ -699,6 +703,11 @@ class StickyNote(QWidget):
         self.hide_tab = None              # 隐藏后显示的标签页小窗口
         self._hover_restored = False      # 当前展开是否由悬停触发（离开即缩回）
         self._auto_rehide_timer = None    # 悬停展开后自动缩回的延迟定时器
+        self._hover_restore_timer = QTimer(self)
+        self._hover_restore_timer.setSingleShot(True)
+        self._hover_restore_timer.timeout.connect(
+            lambda: self._restore_from_auto_hide(hover_triggered=True)
+        )
 
         # 锁定/置顶/收藏状态
         self.is_locked = self.note_data.get('locked', False)
@@ -756,6 +765,17 @@ class StickyNote(QWidget):
         self.title_edit.textChanged.connect(self.update_title)
         self.title_edit.setMaxLength(50)
         main_layout.addWidget(self.title_edit)
+
+        self.preview_hint = QLabel('当前为预览模式 · 点击侧边箭头固定显示便签')
+        self.preview_hint.setObjectName('previewHint')
+        self.preview_hint.setAccessibleName('预览模式提示：点击侧边箭头固定显示便签')
+        self.preview_hint.setAlignment(Qt.AlignCenter)
+        self.preview_hint.setWordWrap(True)
+        self.preview_hint.setMinimumHeight(38)
+        self.preview_hint.setFocusPolicy(Qt.NoFocus)
+        self.preview_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.preview_hint.hide()
+        main_layout.addWidget(self.preview_hint)
 
         # 内容编辑
         self.text_edit = PlainTextEdit()
@@ -2845,6 +2865,7 @@ class StickyNote(QWidget):
             self.text_edit.setStyleSheet(full_style)
             self.title_edit.setStyleSheet(full_style)
             self.apply_adaptive_control_styles(adaptive_styles)
+            self._refresh_preview_hint_style()
             self._refresh_hide_tab_style()
             # md_preview 根据深色/浅色主题设置独立样式
             if hasattr(self, 'md_preview'):
@@ -2890,6 +2911,7 @@ class StickyNote(QWidget):
         adaptive_styles = self._theme_tokens_from_css(default_style, is_dark)
         self._current_theme_styles = adaptive_styles
         self.apply_adaptive_control_styles(adaptive_styles)
+        self._refresh_preview_hint_style()
         self._refresh_hide_tab_style()
         # md_preview 根据深色/浅色主题设置独立样式
         if hasattr(self, 'md_preview'):
@@ -3438,10 +3460,8 @@ class StickyNote(QWidget):
         if self.auto_hidden:
             return
         if event.button() == Qt.LeftButton:
-            # 用户点击便签内容，取消悬停恢复的自动缩回状态
-            self._hover_restored = False
-            self._cancel_rehide_timer()
-
+            if self._hover_restored and not self.hover_preview_enabled:
+                self._pin_preview()
             widget = self.childAt(event.pos())
             if widget in [self.title_edit, self.text_edit]:
                 super().mousePressEvent(event)
@@ -3587,6 +3607,36 @@ class StickyNote(QWidget):
     AUTO_HIDE_THRESHOLD = 3
     HIDE_TAB_WIDTH = 144
     HIDE_TAB_HEIGHT = 34
+    PREVIEW_TAB_WIDTH = 38
+
+    def set_hover_preview_enabled(self, enabled):
+        """即时切换贴边标签交互，不改变便签的展开或隐藏状态。"""
+        self.hover_preview_enabled = bool(enabled)
+        if self._hover_restored:
+            self.preview_hint.setVisible(self.hover_preview_enabled)
+            if self.hover_preview_enabled:
+                if self.hide_tab is None:
+                    self._create_hide_tab()
+                self._set_hide_tab_preview_mode(True)
+                self.hide_tab.show()
+                self.hide_tab.raise_()
+            else:
+                self._discard_hide_tab()
+        elif self.auto_hidden and self.hide_tab is not None:
+            self._set_hide_tab_preview_mode(False)
+
+    def _refresh_preview_hint_style(self):
+        """提示条使用不透明的主题色，确保在图片背景上也可读。"""
+        styles = getattr(self, '_current_theme_styles', {})
+        surface = styles.get('surface_alt', '#FFFDE7')
+        text_color = _readable_color(styles.get('text'), surface, 4.5)
+        border = styles.get('border', '#8A7D22')
+        self.preview_hint.setStyleSheet(
+            f'QLabel#previewHint {{ background-color: {surface}; '
+            f'color: {text_color}; border: 1px solid {border}; '
+            'border-radius: 7px; padding: 5px; font-size: 9pt; '
+            'font-weight: 600; }'
+        )
 
     def _get_screen_geometry(self):
         """获取当前屏幕可用几何区域（1秒缓存）"""
@@ -3637,12 +3687,17 @@ class StickyNote(QWidget):
         if self.auto_hidden:
             return
 
+        self._hover_restore_timer.stop()
+        self._hover_restored = False
+        self.preview_hint.hide()
+        self._cancel_rehide_timer()
         self.auto_hidden = True
         self.hidden_edge = edge
         self._pre_hide_geometry = self.geometry()
 
         # 创建并显示标签页
         self._create_hide_tab()
+        self._set_hide_tab_preview_mode(False)
         self._position_hide_tab()
         self.hide_tab.show()
 
@@ -3668,10 +3723,9 @@ class StickyNote(QWidget):
         self.hide_tab.setFixedSize(self.HIDE_TAB_WIDTH, self.HIDE_TAB_HEIGHT)
         self.hide_tab.setMouseTracking(True)
         self.hide_tab.setAttribute(Qt.WA_StyledBackground, True)
-        self.hide_tab.setCursor(QCursor(Qt.PointingHandCursor))
+        self.hide_tab.setCursor(QCursor(Qt.ArrowCursor))
         self.hide_tab.setFocusPolicy(Qt.StrongFocus)
-        self.hide_tab.setAccessibleName(f'隐藏便签：{title}，单击展开')
-        self.hide_tab.setToolTip('悬停预览便签，单击后保持展开')
+        self.hide_tab.setAccessibleName(f'隐藏便签：{title}')
 
         # Reuse the resolved semantic theme rather than guessing from a stale
         # dark-mode flag. The handle remains opaque even when the note uses an
@@ -3724,6 +3778,7 @@ class StickyNote(QWidget):
         icon_label.setFixedSize(24, 24)
         icon_label.setAlignment(Qt.AlignCenter)
         icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        icon_label.setToolTip('单击箭头保持展开')
         icon_label.setPixmap(
             _make_vector_icon(
                 icon_map.get(self.hidden_edge, 'edge_right'),
@@ -3734,7 +3789,7 @@ class StickyNote(QWidget):
 
         title_label = QLabel(short_title)
         title_label.setObjectName('hideTabTitle')
-        title_label.setToolTip(title)
+        title_label.setToolTip(f'{title}；悬停预览')
         title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(title_label)
         layout.addStretch()
@@ -3743,6 +3798,41 @@ class StickyNote(QWidget):
 
         # 安装事件过滤器以检测悬停和点击
         self.hide_tab.installEventFilter(self)
+        self._set_hide_tab_preview_mode(False)
+
+    def _set_hide_tab_preview_mode(self, preview):
+        """预览时仅保留可点击的侧边箭头；收起时显示完整标签。"""
+        if self.hide_tab is None:
+            return
+        title_label = self.hide_tab.findChild(QLabel, 'hideTabTitle')
+        if title_label is not None:
+            title_label.setVisible(not preview)
+        self.hide_tab.layout().setContentsMargins(5, 4, 5 if preview else 8, 4)
+        self.hide_tab.setFixedSize(
+            self.PREVIEW_TAB_WIDTH if preview else self.HIDE_TAB_WIDTH,
+            self.HIDE_TAB_HEIGHT,
+        )
+        if preview:
+            description = '预览模式：单击箭头固定显示便签'
+        elif self.hover_preview_enabled:
+            description = '悬停标题临时预览，单击箭头固定显示便签'
+        else:
+            description = '悬停预览便签，单击标签页任意位置固定展开'
+        self.hide_tab.setToolTip(description)
+        self.hide_tab.setAccessibleName(description)
+        self.hide_tab.setCursor(QCursor(
+            Qt.ArrowCursor if self.hover_preview_enabled and not preview
+            else Qt.PointingHandCursor
+        ))
+        if self._pre_hide_geometry is not None:
+            self._position_hide_tab()
+
+    def _discard_hide_tab(self):
+        if self.hide_tab is not None:
+            self.hide_tab.hide()
+            self.hide_tab.removeEventFilter(self)
+            self.hide_tab.deleteLater()
+            self.hide_tab = None
 
     def _refresh_hide_tab_style(self):
         """Refresh an existing edge handle after a theme change."""
@@ -3795,7 +3885,7 @@ class StickyNote(QWidget):
             return
         screen = self._get_screen_geometry()
         pre_geo = self._pre_hide_geometry
-        tab_w, tab_h = self.HIDE_TAB_WIDTH, self.HIDE_TAB_HEIGHT
+        tab_w, tab_h = self.hide_tab.width(), self.hide_tab.height()
 
         if self.hidden_edge == 'left':
             x = screen.left()
@@ -3852,19 +3942,21 @@ class StickyNote(QWidget):
         if not self.auto_hidden:
             return
 
+        self._hover_restore_timer.stop()
         self.auto_hidden = False
-        self.hidden_edge = None
+        if not hover_triggered:
+            self.hidden_edge = None
         self._hover_restored = hover_triggered
+        self.preview_hint.setVisible(hover_triggered and self.hover_preview_enabled)
 
         # 取消之前的缩回定时器
         self._cancel_rehide_timer()
 
-        # 隐藏并清理标签页
-        if self.hide_tab is not None:
-            self.hide_tab.hide()
-            self.hide_tab.removeEventFilter(self)
-            self.hide_tab.deleteLater()
-            self.hide_tab = None
+        if hover_triggered and self.hover_preview_enabled:
+            self._set_hide_tab_preview_mode(True)
+            self.hide_tab.show()
+        else:
+            self._discard_hide_tab()
 
         # 动画滑回原位
         if self._pre_hide_geometry:
@@ -3899,46 +3991,90 @@ class StickyNote(QWidget):
 
     def _on_restore_finished(self):
         """恢复动画完成后的清理"""
-        self._pre_hide_geometry = None
         self.setWindowOpacity(self.note_data.get('opacity', 0.9))
         self.raise_()
-        self.activateWindow()
 
-        # 如果是悬停触发的恢复，启动缩回检测
         if self._hover_restored:
+            if self.hide_tab is not None:
+                self.hide_tab.raise_()
             self._schedule_rehide_check()
+        else:
+            self._pre_hide_geometry = None
+            self.activateWindow()
+
+    def _is_hide_tab_arrow_pos(self, pos):
+        """给箭头四周留少量点击余量，且不占用标题区。"""
+        icon = self.hide_tab.findChild(QLabel, 'hideTabIcon')
+        return icon is not None and icon.geometry().adjusted(-5, -4, 5, 4).contains(pos)
+
+    def _update_hide_tab_hover(self, pos):
+        """新版区分箭头与标题；旧版整条标签页都可悬停预览。"""
+        if not self.auto_hidden or self.hide_tab is None:
+            self._hover_restore_timer.stop()
+            return
+        over_arrow = self.hover_preview_enabled and self._is_hide_tab_arrow_pos(pos)
+        self.hide_tab.setCursor(QCursor(
+            Qt.PointingHandCursor if over_arrow or not self.hover_preview_enabled
+            else Qt.ArrowCursor
+        ))
+        if not self.hide_tab.rect().contains(pos) or over_arrow:
+            self._hover_restore_timer.stop()
+        elif not self._hover_restore_timer.isActive():
+            self._hover_restore_timer.start(300)
 
     def eventFilter(self, obj, event):
         """
         事件过滤器：处理隐藏标签页的鼠标悬停和点击。
         
-        悬停 300ms 后自动展开便签（离开便签区域会自动缩回），
-        单击立即展开且保持展开（不会自动缩回）。
+        新版悬停非箭头区域预览、点击箭头固定；旧版整条标签页可悬停或点击。
         """
         if obj == self.hide_tab and self.auto_hidden:
             if event.type() == QEvent.Enter:
-                # 悬停延迟展开
-                self._hover_restore_timer = QTimer(self)
-                self._hover_restore_timer.setSingleShot(True)
-                self._hover_restore_timer.timeout.connect(
-                    lambda: self._restore_from_auto_hide(hover_triggered=True)
-                )
-                self._hover_restore_timer.start(300)
+                self._update_hide_tab_hover(self.hide_tab.mapFromGlobal(QCursor.pos()))
+            elif event.type() == QEvent.MouseMove:
+                self._update_hide_tab_hover(event.pos())
             elif event.type() == QEvent.Leave:
-                # 鼠标离开，取消悬停展开
-                if hasattr(self, '_hover_restore_timer') and self._hover_restore_timer is not None:
-                    self._hover_restore_timer.stop()
-            elif event.type() == QEvent.MouseButtonPress:
-                # 点击立即展开，且保持展开（不自动缩回）
-                if hasattr(self, '_hover_restore_timer') and self._hover_restore_timer is not None:
-                    self._hover_restore_timer.stop()
+                self._hover_restore_timer.stop()
+            elif (event.type() == QEvent.MouseButtonPress
+                    and event.button() == Qt.LeftButton
+                    and (not self.hover_preview_enabled
+                         or self._is_hide_tab_arrow_pos(event.pos()))):
+                self._hover_restore_timer.stop()
                 self._restore_from_auto_hide(hover_triggered=False)
                 return True
             elif event.type() == QEvent.KeyPress and event.key() in (
                     Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
                 self._restore_from_auto_hide(hover_triggered=False)
                 return True
+        elif obj == self.hide_tab and self._hover_restored and self.hover_preview_enabled:
+            if (event.type() == QEvent.MouseButtonPress
+                    and event.button() == Qt.LeftButton
+                    and self._is_hide_tab_arrow_pos(event.pos())):
+                self._pin_preview()
+                return True
+            if event.type() == QEvent.KeyPress and event.key() in (
+                    Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self._pin_preview()
+                return True
+            if event.type() == QEvent.Enter:
+                self._cancel_rehide_timer()
+            elif event.type() == QEvent.Leave:
+                self._schedule_rehide_check()
         return super().eventFilter(obj, event)
+
+    def _pin_preview(self):
+        """预览中点击箭头后，保留当前展开位置。"""
+        if not self._hover_restored:
+            return
+        self._hover_restored = False
+        self.hidden_edge = None
+        self._pre_hide_geometry = None
+        self.preview_hint.hide()
+        self._hover_restore_timer.stop()
+        self._cancel_rehide_timer()
+        self._discard_hide_tab()
+        self.raise_()
+        self.activateWindow()
 
     def perform_resize(self, global_pos):
         delta = global_pos - self.drag_pos
@@ -4033,7 +4169,12 @@ class StickyNote(QWidget):
         # 检查鼠标是否在便签区域内
         cursor_pos = QCursor.pos()
         note_geo = self.geometry()
-        if not note_geo.contains(cursor_pos):
+        over_preview_handle = (
+            self.hover_preview_enabled and self.hide_tab is not None
+            and self.hide_tab.isVisible()
+            and self.hide_tab.geometry().contains(cursor_pos)
+        )
+        if not note_geo.contains(cursor_pos) and not over_preview_handle:
             self._auto_rehide()
 
     def _auto_rehide(self):
@@ -4042,32 +4183,20 @@ class StickyNote(QWidget):
             return
 
         self._hover_restored = False
+        self.preview_hint.hide()
         self._cancel_rehide_timer()
 
-        # 确定隐藏边缘
-        desktop = QApplication.desktop()
-        if not desktop:
+        edge = self.hidden_edge
+        if edge is None:
             return
-        screen = self._get_screen_geometry()
-        geo = self.geometry()
 
-        # 根据当前位置判断最近边缘
-        dist_left = abs(geo.left() - screen.left())
-        dist_right = abs(geo.right() - screen.right())
-        dist_top = abs(geo.top() - screen.top())
-        dist_bottom = abs(geo.bottom() - screen.bottom())
-        edges = [
-            (dist_left, 'left'), (dist_right, 'right'),
-            (dist_top, 'top'), (dist_bottom, 'bottom')
-        ]
-        edge = min(edges, key=lambda x: x[0])[1]
-
-        self._pre_hide_geometry = geo
+        self._pre_hide_geometry = self.geometry()
         self.auto_hidden = True
         self.hidden_edge = edge
 
         # 创建并显示标签页
         self._create_hide_tab()
+        self._set_hide_tab_preview_mode(False)
         self._position_hide_tab()
         self.hide_tab.show()
 

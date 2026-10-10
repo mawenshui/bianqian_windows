@@ -66,6 +66,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     },
     'ui': {
         'settings_tool_order': list(DEFAULT_SETTINGS_TOOL_ORDER),
+        'hover_preview_enabled': True,
     },
 }
 

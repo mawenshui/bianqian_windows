@@ -7,7 +7,7 @@ import shutil
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from PyQt5.QtCore import QPoint, QRect, Qt, QEvent
-from PyQt5.QtGui import QCursor, QKeyEvent
+from PyQt5.QtGui import QCursor, QKeyEvent, QMouseEvent
 from PyQt5.QtWidgets import QApplication, QLabel
 
 
@@ -395,6 +395,212 @@ class TestHideTabPositioning(unittest.TestCase):
 
             note.hide_tab.deleteLater()
             note.hide_tab = None
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_arrow_hover_does_not_preview_but_title_hover_does(self):
+        """从标题移到箭头应取消预览，移回标题可重新计时。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note.hide_tab.show()
+            QApplication.processEvents()
+
+            def move_at(pos):
+                event = QMouseEvent(QEvent.MouseMove, pos, Qt.NoButton,
+                                    Qt.NoButton, Qt.NoModifier)
+                note.eventFilter(note.hide_tab, event)
+
+            arrow = note.hide_tab.findChild(QLabel, 'hideTabIcon').geometry().center()
+            title = note.hide_tab.findChild(QLabel, 'hideTabTitle').geometry().center()
+            move_at(arrow)
+            self.assertFalse(note._hover_restore_timer.isActive())
+            move_at(title)
+            self.assertTrue(note._hover_restore_timer.isActive())
+            move_at(arrow)
+            self.assertFalse(note._hover_restore_timer.isActive())
+            move_at(title)
+            note.eventFilter(note.hide_tab, QEvent(QEvent.Leave))
+            self.assertFalse(note._hover_restore_timer.isActive())
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_only_left_click_on_arrow_pins_note(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note.hide_tab.show()
+            QApplication.processEvents()
+            arrow = note.hide_tab.findChild(QLabel, 'hideTabIcon').geometry().center()
+            title = note.hide_tab.findChild(QLabel, 'hideTabTitle').geometry().center()
+
+            def press_at(pos, button):
+                event = QMouseEvent(QEvent.MouseButtonPress, pos, button,
+                                    button, Qt.NoModifier)
+                return note.eventFilter(note.hide_tab, event)
+
+            with patch.object(note, '_restore_from_auto_hide') as restore:
+                press_at(title, Qt.LeftButton)
+                press_at(arrow, Qt.RightButton)
+                restore.assert_not_called()
+                self.assertTrue(press_at(arrow, Qt.LeftButton))
+                restore.assert_called_once_with(hover_triggered=False)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_hover_preview_rehides_to_original_edge(self):
+        """预览动画结束后保留原边缘，并在鼠标离开时重新收起。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.move(1520, 200)
+            note.auto_hidden = True
+            note.hidden_edge = 'right'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            with patch.object(note, '_get_screen_geometry', return_value=QRect(0, 0, 1920, 1080)):
+                note._restore_from_auto_hide(hover_triggered=True)
+                note._slide_anim.stop()
+                note._on_restore_finished()
+                self.assertTrue(note._hover_restored)
+                self.assertIsNotNone(note._pre_hide_geometry)
+                self.assertEqual(note.hidden_edge, 'right')
+                with patch('core.note.QCursor.pos', return_value=QPoint(-1000, -1000)):
+                    with patch.object(note, '_slide_out_animation') as slide_out:
+                        note._check_and_rehide()
+                        slide_out.assert_called_once_with('right')
+                self.assertTrue(note.auto_hidden)
+                self.assertEqual(note.hidden_edge, 'right')
+                self.assertIsNotNone(note.hide_tab)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_click_restore_clears_preview_state(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note._restore_from_auto_hide(hover_triggered=False)
+            note._slide_anim.stop()
+            note._on_restore_finished()
+            self.assertFalse(note.auto_hidden)
+            self.assertFalse(note._hover_restored)
+            self.assertIsNone(note.hidden_edge)
+            self.assertIsNone(note._pre_hide_geometry)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_clicking_preview_note_does_not_pin_it(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note._hover_restored = True
+            note._pre_hide_geometry = note.geometry()
+            note.hidden_edge = 'left'
+            note._schedule_rehide_check()
+            event = QMouseEvent(QEvent.MouseButtonPress, QPoint(200, 150),
+                                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+            note.mousePressEvent(event)
+            self.assertTrue(note._hover_restored)
+            self.assertTrue(note._auto_rehide_timer.isActive())
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_legacy_setting_restores_whole_tab_hover_and_click(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.set_hover_preview_enabled(False)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note.hide_tab.show()
+            QApplication.processEvents()
+            arrow = note.hide_tab.findChild(QLabel, 'hideTabIcon').geometry().center()
+            title = note.hide_tab.findChild(QLabel, 'hideTabTitle').geometry().center()
+            note._update_hide_tab_hover(arrow)
+            self.assertTrue(note._hover_restore_timer.isActive())
+            note._hover_restore_timer.stop()
+            click = QMouseEvent(QEvent.MouseButtonPress, title, Qt.LeftButton,
+                                Qt.LeftButton, Qt.NoModifier)
+            with patch.object(note, '_restore_from_auto_hide') as restore:
+                self.assertTrue(note.eventFilter(note.hide_tab, click))
+                restore.assert_called_once_with(hover_triggered=False)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_preview_shows_hint_and_arrow_can_pin(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note._restore_from_auto_hide(hover_triggered=True)
+            note._slide_anim.stop()
+            self.assertTrue(note.preview_hint.isVisibleTo(note))
+            self.assertIn('预览模式', note.preview_hint.text())
+            self.assertEqual(note.hide_tab.width(), note.PREVIEW_TAB_WIDTH)
+            with patch('core.note.QCursor.pos', return_value=note.hide_tab.geometry().center()):
+                note._check_and_rehide()
+            self.assertTrue(note._hover_restored)
+            arrow = note.hide_tab.findChild(QLabel, 'hideTabIcon').geometry().center()
+            click = QMouseEvent(QEvent.MouseButtonPress, arrow, Qt.LeftButton,
+                                Qt.LeftButton, Qt.NoModifier)
+            self.assertTrue(note.eventFilter(note.hide_tab, click))
+            self.assertFalse(note._hover_restored)
+            self.assertFalse(note.preview_hint.isVisibleTo(note))
+            self.assertIsNone(note.hide_tab)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_live_setting_toggle_changes_active_preview(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note._restore_from_auto_hide(hover_triggered=True)
+            note._slide_anim.stop()
+            note.set_hover_preview_enabled(False)
+            self.assertTrue(note._hover_restored)
+            self.assertIsNone(note.hide_tab)
+            self.assertFalse(note.preview_hint.isVisibleTo(note))
+            note.set_hover_preview_enabled(True)
+            self.assertIsNotNone(note.hide_tab)
+            self.assertEqual(note.hide_tab.width(), note.PREVIEW_TAB_WIDTH)
+            self.assertTrue(note.preview_hint.isVisibleTo(note))
             note.is_deleted = True
             note.close()
         finally:

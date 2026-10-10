@@ -1010,6 +1010,18 @@ class StickyNoteManager:
                 note.apply_settings_tool_order(normalised)
         return normalised
 
+    def get_hover_preview_enabled(self) -> bool:
+        """读取贴边便签是否使用新版悬浮预览交互。"""
+        return self.config.get('ui.hover_preview_enabled', True) is not False
+
+    def set_hover_preview_enabled(self, enabled: bool) -> None:
+        """保存交互偏好并立即应用到已打开的便签。"""
+        enabled = bool(enabled)
+        self.config.set('ui.hover_preview_enabled', enabled)
+        self.settings.setdefault('ui', {})['hover_preview_enabled'] = enabled
+        for note in self.notes.values():
+            note.set_hover_preview_enabled(enabled)
+
     def _init_theme_watcher(self) -> None:
         """初始化主题文件热加载监视器"""
         try:

@@ -116,6 +116,13 @@ class _FakeManager:
         self.config.set('ui.settings_tool_order', list(order))
         return list(order)
 
+    def get_hover_preview_enabled(self):
+        return self.config.get('ui.hover_preview_enabled', True)
+
+    def set_hover_preview_enabled(self, enabled):
+        self.config.set('ui.hover_preview_enabled', bool(enabled))
+        self.settings.setdefault('ui', {})['hover_preview_enabled'] = bool(enabled)
+
 
 class TestSettingsDialogUI(unittest.TestCase):
     @classmethod
@@ -201,6 +208,14 @@ class TestSettingsDialogUI(unittest.TestCase):
         self.assertTrue(self.dialog._settings_theme_tokens['dark'])
         self.assertIn('QDialog#settingsDialog', self.dialog.styleSheet())
         self.assertIn('QFrame#themePreview', self.dialog.preview_note.styleSheet())
+
+    def test_hover_preview_setting_is_saved_immediately(self):
+        checkbox = self.dialog.hover_preview_checkbox
+        self.assertTrue(checkbox.isChecked())
+        checkbox.click()
+        self.assertFalse(self.manager.config.get('ui.hover_preview_enabled'))
+        checkbox.click()
+        self.assertTrue(self.manager.config.get('ui.hover_preview_enabled'))
         self.assertFalse(self.dialog.preview_note.grab().isNull())
 
     def test_theme_preview_footer_is_not_clipped(self):

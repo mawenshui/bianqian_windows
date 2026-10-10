@@ -87,6 +87,17 @@ class TestConfigManager(unittest.TestCase):
         mgr = self._create_config_manager()
         self.assertTrue(mgr.auto_check_update)
 
+    def test_hover_preview_defaults_on_and_persists_when_disabled(self):
+        from core.config import ConfigManager
+        mgr = self._create_config_manager()
+        self.assertTrue(mgr.get('ui.hover_preview_enabled'))
+        mgr.set('ui.hover_preview_enabled', False)
+        ConfigManager._instance = None
+        ConfigManager._init_done = False
+        with patch('core.config.get_user_data_dir', return_value=self.temp_dir):
+            reloaded = ConfigManager()
+        self.assertIs(reloaded.get('ui.hover_preview_enabled'), False)
+
     def test_default_font_settings(self):
         """默认字体设置验证"""
         mgr = self._create_config_manager()

@@ -835,6 +835,28 @@ class SettingsDialog(QDialog):
         theme_group.setLayout(theme_layout)
         layout.addWidget(theme_group)
 
+        interaction_group = QGroupBox('贴边便签交互')
+        interaction_layout = QVBoxLayout()
+        self.hover_preview_checkbox = QCheckBox('启用新版悬浮预览')
+        self.hover_preview_checkbox.setObjectName('hoverPreviewCheckbox')
+        self.hover_preview_checkbox.setAccessibleName('启用新版贴边悬浮预览')
+        self.hover_preview_checkbox.setChecked(
+            self.manager.get_hover_preview_enabled()
+        )
+        self.hover_preview_checkbox.toggled.connect(
+            self.manager.set_hover_preview_enabled
+        )
+        interaction_layout.addWidget(self.hover_preview_checkbox)
+        interaction_hint = QLabel(
+            '开启：悬停标题临时预览，点击侧边箭头固定展开。'
+            '关闭：沿用旧版逻辑，悬停整条标签页预览，点击标签页任意位置固定展开。'
+        )
+        interaction_hint.setWordWrap(True)
+        interaction_hint.setProperty('settingsRole', 'muted')
+        interaction_layout.addWidget(interaction_hint)
+        interaction_group.setLayout(interaction_layout)
+        layout.addWidget(interaction_group)
+
         # Daily control order is part of the theme-facing note chrome. Place
         # it before the decorative theme preview so it is immediately useful.
         self._setup_tool_order_editor(layout)

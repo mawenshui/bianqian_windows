@@ -126,7 +126,7 @@ bdist_msi_options = {
         'Shortcut': [
             # Shortcut, Directory_, Name, Component_, Target, Arguments, Description, Hotkey, Icon_, IconIndex, ShowCmd, WkDir
             ('DesktopShortcut', 'DesktopFolder', '便签.lnk', 'DesktopShortcut',
-             '[TARGETDIR]StickyNote.exe', '', '桌面便签应用', '', '', '', '', ''),
+             '[#StickyNote.exe]', '', '桌面便签应用', '', '', '', '', ''),
         ],
         'FeatureComponents': [
             ('default', 'DesktopShortcut'),
@@ -158,7 +158,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.7.8',
+    version='1.7.9',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={

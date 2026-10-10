@@ -4,17 +4,17 @@
 
 ## 1. 当前项目基线
 
-截至 2026-08-26，本地仓库状态如下：
+截至 2026-10-10，v1.7.9 发布基线如下：
 
-- Git 分支：`main`，跟踪 `origin/main`；目录整理提交 `27a4ddc`、标签 `v1.7.8` 和 GitHub Release 均已同步。
-- 当前代码版本：`1.7.8`。
+- Git 分支：`main`，跟踪 `origin/main`；当前正式标签为 `v1.7.9`。
+- 当前代码版本：`1.7.9`。
 - 版本来源：`core/__init__.py`、`features/__init__.py`、`setup.py`、`pyproject.toml`。
-- 自动化测试：`tests/` 下有 17 个 `test_*.py` 文件；v1.7.8 整理后收集 306 项测试和 65 个子测试。
-- 当前正式产物位于 `artifacts/releases/v1.7.8/`，并已发布至 GitHub Release；包含便携目录、Portable ZIP、MSI、发布说明和 SHA256 校验文件。
+- 自动化测试：`tests/` 下有 18 个 `test_*.py` 文件；v1.7.9 收集 317 项测试和 65 个子测试。
+- 当前正式产物位于 `artifacts/releases/v1.7.9/`，并发布至 GitHub Release；包含便携目录、Portable ZIP、MSI、发布说明和 SHA256 校验文件。
 - 过时文档已移入 `docs/archive/` 并明确标记为历史资料；当前文档不得继续使用归档版本号描述现状。
 - 发布工具已整理到 `tools/release/`；`create_release.py` 从目标版本目录读取资产和 UTF-8 发布说明，不再硬编码版本。
-- Codex 工作区提供 Python 3.12 运行时，但项目测试及构建依赖仍需在使用前安装并验证。
-- v1.7.8 发布时根据用户明确授权使用了系统环境变量 `GITHUB_TOKEN`；令牌未写入文件或发布日志。
+- 本地 `.venv` 使用 Python 3.12；每次任务仍需验证依赖和构建工具。
+- v1.7.9 发布使用系统环境变量 `GTIHUB_TOKEN`；令牌不得写入文件或发布日志。
 
 以上内容是状态快照，不可替代每次任务开始时的重新检查。
 
