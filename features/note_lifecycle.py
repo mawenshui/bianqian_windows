@@ -2,12 +2,14 @@
 """便签归档与本地回收站。文件操作在服务层完成，窗口由管理器关闭。"""
 
 import json
+import hashlib
 import os
 import re
 import shutil
 import tempfile
 import time
 import uuid
+import zipfile
 from datetime import datetime
 
 
@@ -249,6 +251,8 @@ class NoteLifecycle:
         return note_id
 
     def purge(self, name):
+        """删除单条回收站记录及其专属资源。"""
+        self.preview_purge([name])
         path = self._trash_path(name)
         data = self._read(path)
         os.remove(path)
@@ -265,17 +269,132 @@ class NoteLifecycle:
             if os.path.isfile(image_path):
                 os.remove(image_path)
 
-    def cleanup(self, retention_days):
+    def preview_purge(self, names):
+        """只读统计永久删除影响，拒绝无效条目和链接。"""
+        report = {'notes': 0, 'attachments': 0, 'attachment_bytes': 0,
+                  'backgrounds': 0, 'background_bytes': 0, 'names': []}
+        for name in dict.fromkeys(names):
+            data = self._read(self._trash_path(name))
+            report['notes'] += 1
+            report['names'].append(name)
+            folder_name = data.get('trash_attachments')
+            if folder_name:
+                if folder_name != name[:-5]:
+                    raise ValueError(f'回收站附件归属不一致: {name}')
+                folder = os.path.join(self.trash_dir, 'attachments', folder_name)
+                if os.path.islink(folder):
+                    raise ValueError('不允许清理链接附件目录')
+                if os.path.isdir(folder):
+                    for filename in os.listdir(folder):
+                        path = os.path.join(folder, filename)
+                        if os.path.islink(path) or not os.path.isfile(path):
+                            raise ValueError(f'附件不是普通文件: {filename}')
+                        report['attachments'] += 1
+                        report['attachment_bytes'] += os.path.getsize(path)
+            image_name = data.get('trash_background')
+            if isinstance(image_name, str) and re.fullmatch(
+                r'[0-9a-f]{32}_background_\d+_[^/\\]+', image_name
+            ):
+                path = os.path.join(self.trash_dir, 'images', image_name)
+                if os.path.islink(path):
+                    raise ValueError('不允许清理链接背景图')
+                if os.path.isfile(path):
+                    report['backgrounds'] += 1
+                    report['background_bytes'] += os.path.getsize(path)
+        return report
+
+    def preview_cleanup(self, retention_days):
+        """只读列出超过保留期限的便签及资源。"""
+        if retention_days <= 0:
+            return self.preview_purge([])
+        cutoff = time.time() - retention_days * 86400
+        names = [item['name'] for item in self.list_trash()
+                 if os.path.getmtime(self._trash_path(item['name'])) < cutoff]
+        return self.preview_purge(names)
+
+    def scan_orphan_attachments(self):
+        """查找没有被便签 JSON 引用的托管附件。"""
+        orphaned = []
+        for root, pattern in ((self.notes_dir, r'note_\d+'),
+                              (self.trash_dir, r'note_\d+_[0-9a-f]{32}')):
+            attachment_root = os.path.join(root, 'attachments')
+            if not os.path.isdir(attachment_root) or os.path.islink(attachment_root):
+                continue
+            for folder in os.listdir(attachment_root):
+                if not re.fullmatch(pattern, folder):
+                    continue
+                directory = os.path.join(attachment_root, folder)
+                if not os.path.isdir(directory) or os.path.islink(directory):
+                    continue
+                note_path = os.path.join(root, folder + '.json')
+                data = self._read(note_path) if os.path.isfile(note_path) else {}
+                referenced = {
+                    entry['path'].rsplit('/', 1)[-1]
+                    for entry in data.get('attachments', [])
+                    if isinstance(entry, dict) and isinstance(entry.get('path'), str)
+                }
+                for filename in os.listdir(directory):
+                    path = os.path.join(directory, filename)
+                    if (re.fullmatch(r'[0-9a-f]{32}_[^/\\]+', filename)
+                            and os.path.isfile(path) and not os.path.islink(path)
+                            and filename not in referenced):
+                        orphaned.append({'path': path, 'bytes': os.path.getsize(path)})
+        return orphaned
+
+    def remove_orphan_attachments(self):
+        """重新扫描后仅删除仍未被引用的普通文件。"""
+        orphaned = self.scan_orphan_attachments()
+        for entry in orphaned:
+            os.remove(entry['path'])
+        return len(orphaned)
+
+    def archive_and_remove_orphans(self, backup_dir):
+        """先独立归档并校验孤立文件，再逐个删除；归档始终保留。"""
+        orphaned = self.scan_orphan_attachments()
+        if not orphaned:
+            return 0, None
+        os.makedirs(backup_dir, exist_ok=True)
+        archive_path = os.path.join(
+            backup_dir, f'orphan_attachments_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.zip'
+        )
+        expected = {}
+        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for entry in orphaned:
+                root = self.notes_dir if os.path.commonpath([entry['path'], self.notes_dir]) == self.notes_dir else self.trash_dir
+                folder = 'notes' if root == self.notes_dir else 'trash'
+                member = f'{folder}/{os.path.relpath(entry["path"], root).replace(os.sep, "/")}'
+                with open(entry['path'], 'rb') as stream:
+                    payload = stream.read()
+                expected[member] = hashlib.sha256(payload).hexdigest()
+                archive.writestr(member, payload)
+            archive.writestr('SHA256.json', json.dumps(expected, ensure_ascii=False))
+        with zipfile.ZipFile(archive_path) as archive:
+            if archive.testzip() or any(hashlib.sha256(archive.read(name)).hexdigest() != digest
+                                        for name, digest in expected.items()):
+                raise RuntimeError('孤立附件归档校验失败，未清理')
+        current = {entry['path'] for entry in self.scan_orphan_attachments()}
+        removed = 0
+        for entry in orphaned:
+            if entry['path'] in current:
+                root = self.notes_dir if os.path.commonpath([entry['path'], self.notes_dir]) == self.notes_dir else self.trash_dir
+                folder = 'notes' if root == self.notes_dir else 'trash'
+                member = f'{folder}/{os.path.relpath(entry["path"], root).replace(os.sep, "/")}'
+                with open(entry['path'], 'rb') as stream:
+                    if hashlib.sha256(stream.read()).hexdigest() != expected[member]:
+                        continue  # 归档之后内容变化，保留文件等待下次检查。
+                os.remove(entry['path'])
+                removed += 1
+        return removed, archive_path
+
+    def cleanup(self, retention_days, safety_backup=None):
         if retention_days <= 0:
             return 0  # 0 表示永久保留，直到用户手动清空。
-        cutoff = time.time() - retention_days * 86400
-        count = 0
-        for item in self.list_trash():
-            path = self._trash_path(item['name'])
-            if os.path.getmtime(path) < cutoff:
-                self.purge(item['name'])
-                count += 1
-        return count
+        report = self.preview_cleanup(retention_days)
+        if report['notes'] and safety_backup is not None and not safety_backup():
+            raise RuntimeError('自动清理前安全备份失败，回收站未修改')
+        for name in report['names']:
+            self.purge(name)
+        return report['notes']
 
 
 class NoteLifecycleDialog:
@@ -300,6 +419,7 @@ class NoteLifecycleDialog:
         archive_page = QWidget()
         archive_layout = QVBoxLayout(archive_page)
         archive_list = QListWidget()
+        archive_list.setAccessibleName('归档便签列表')
         archive_list.setSelectionMode(QListWidget.ExtendedSelection)
         archive_layout.addWidget(archive_list)
         archive_actions = QHBoxLayout()
@@ -311,15 +431,19 @@ class NoteLifecycleDialog:
         trash_page = QWidget()
         trash_layout = QVBoxLayout(trash_page)
         trash_list = QListWidget()
+        trash_list.setAccessibleName('回收站便签列表')
         trash_list.setSelectionMode(QListWidget.ExtendedSelection)
         trash_layout.addWidget(trash_list)
         trash_actions = QHBoxLayout()
         restore_button = QPushButton('恢复选中')
         purge_button = QPushButton('永久删除选中')
+        orphan_button = QPushButton('检查孤立附件')
         trash_actions.addWidget(restore_button)
         trash_actions.addWidget(purge_button)
+        trash_actions.addWidget(orphan_button)
         trash_layout.addLayout(trash_actions)
         retention = QSpinBox()
+        retention.setAccessibleName('回收站保留天数')
         retention.setRange(0, 3650)
         retention.setSuffix(' 天（0 为永久保留）')
         retention.setValue(manager.config.get('trash_retention_days', 30))
@@ -362,24 +486,85 @@ class NoteLifecycleDialog:
             items = trash_list.selectedItems()
             if not items:
                 return
+            names = [item.data(Qt.UserRole) for item in items]
+            try:
+                impact = manager.lifecycle.preview_purge(names)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(dialog, '无法预览删除', str(exc))
+                return
             if QMessageBox.question(
                 dialog, '永久删除',
-                f'永久删除选中的 {len(items)} 个便签？此操作无法撤销。',
+                f'将永久删除 {impact["notes"]} 个便签、{impact["attachments"]} 个附件'
+                f'（{impact["attachment_bytes"] / 1024 / 1024:.1f} MB）和 '
+                f'{impact["backgrounds"]} 张背景图。清理前会创建安全备份。',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             ) != QMessageBox.Yes:
                 return
-            for item in items:
-                manager.lifecycle.purge(item.data(Qt.UserRole))
+            snapshot = manager.backup_manager.create_backup()
+            if not snapshot or not manager.backup_manager.preview_backup(snapshot)['valid']:
+                QMessageBox.warning(dialog, '删除已取消', '安全备份失败，回收站未修改。')
+                return
+            for name in names:
+                try:
+                    manager.lifecycle.purge(name)
+                except (OSError, ValueError) as exc:
+                    QMessageBox.warning(dialog, '删除未完成', f'{name}: {exc}')
+                    break
             refresh()
+            QMessageBox.information(dialog, '删除完成', f'安全备份：\n{snapshot}')
+
+        def inspect_orphans():
+            try:
+                entries = manager.lifecycle.scan_orphan_attachments()
+                total = sum(entry['bytes'] for entry in entries)
+                if not entries:
+                    QMessageBox.information(dialog, '孤立附件检查', '未发现孤立附件。')
+                    return
+                detail = '\n'.join(os.path.basename(entry['path']) for entry in entries[:8])
+                if QMessageBox.question(
+                    dialog, '孤立附件检查',
+                    f'发现 {len(entries)} 个未被便签引用的附件，共 {total / 1024 / 1024:.1f} MB。'
+                    f'\n预览：\n{detail}\n\n创建安全备份后清理？',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) != QMessageBox.Yes:
+                    return
+                removed, snapshot = manager.lifecycle.archive_and_remove_orphans(
+                    manager.backup_manager.backup_dir)
+                QMessageBox.information(dialog, '清理完成',
+                                        f'清理 {removed} 个孤立附件。安全备份：\n{snapshot}')
+            except (OSError, ValueError, RuntimeError) as exc:
+                QMessageBox.warning(dialog, '孤立附件检查失败', str(exc))
 
         def save_retention(value):
+            previous = manager.config.get('trash_retention_days', 30)
+            try:
+                impact = manager.lifecycle.preview_cleanup(value)
+                if impact['notes'] and QMessageBox.question(
+                    dialog, '到期清理预览',
+                    f'将清理 {impact["notes"]} 个便签、{impact["attachments"]} 个附件'
+                    f'（{impact["attachment_bytes"] / 1024 / 1024:.1f} MB）。'
+                    '清理前会创建安全备份。继续吗？',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) != QMessageBox.Yes:
+                    retention.blockSignals(True)
+                    retention.setValue(previous)
+                    retention.blockSignals(False)
+                    return
+                if impact['notes'] and manager.cleanup_trash(value) != impact['notes']:
+                    raise RuntimeError('清理未完成，保留期限未修改')
+            except (OSError, ValueError, RuntimeError) as exc:
+                QMessageBox.warning(dialog, '到期清理失败', str(exc))
+                retention.blockSignals(True)
+                retention.setValue(previous)
+                retention.blockSignals(False)
+                return
             manager.config.set('trash_retention_days', value)
-            manager.lifecycle.cleanup(value)
             refresh()
 
         unarchive_button.clicked.connect(unarchive)
         restore_button.clicked.connect(restore)
         purge_button.clicked.connect(purge)
+        orphan_button.clicked.connect(inspect_orphans)
         retention.valueChanged.connect(save_retention)
         refresh()
         dialog.exec_()

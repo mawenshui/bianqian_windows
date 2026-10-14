@@ -3523,6 +3523,10 @@ class StickyNote(QWidget):
                 except ImportError:
                     self.md_renderer = None
             md_text = self.text_edit.toPlainText()
+            from features.import_export import format_checklist
+            checklist_text = format_checklist(self.note_data.get('checklist', []), True)
+            if checklist_text:
+                md_text += f'\n\n## 清单\n\n{checklist_text}'
             if self.md_renderer:
                 body_html, css = self.md_renderer.render_for_qt(md_text)
                 # 使用 setDefaultStyleSheet + body-only HTML 确保 QTextBrowser 正确渲染样式

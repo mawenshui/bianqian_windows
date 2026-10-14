@@ -11,6 +11,8 @@
 
 from datetime import datetime, timedelta
 import calendar
+import copy
+import time
 from enum import Enum
 
 from PyQt5.QtWidgets import (
@@ -211,20 +213,42 @@ class ReminderManager:
 
     def __init__(self, manager):
         self.manager = manager
+        self._undo = []
+        self.last_check_reason = '启动检查'
+        self.last_check_at = None
+        self._last_wall = datetime.now()
+        self._last_monotonic = time.monotonic()
+        self._last_offset = datetime.now().astimezone().utcoffset()
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_reminders)
         self.timer.start(30000)  # 每 30 秒检查一次
+        QTimer.singleShot(0, self.check_reminders)
 
     def check_reminders(self):
         """检查所有便签是否有到期的提醒"""
+        now = datetime.now()
+        monotonic = time.monotonic()
+        offset = now.astimezone().utcoffset()
+        wall_elapsed = (now - self._last_wall).total_seconds()
+        elapsed = monotonic - self._last_monotonic
+        if offset != self._last_offset:
+            self.last_check_reason = '时区变化检查'
+        elif wall_elapsed - elapsed > 60:
+            self.last_check_reason = '唤醒或时钟变化检查'
+        elif self.last_check_at is None:
+            self.last_check_reason = '启动补触发检查'
+        else:
+            self.last_check_reason = '定时检查'
+        self.last_check_at = now
+        self._last_wall, self._last_monotonic, self._last_offset = now, monotonic, offset
         for note in list(self.manager.notes.values()):
-            if note.is_deleted:
+            if getattr(note, 'is_deleted', False):
                 continue
             reminder_data = note.note_data.get('reminder')
             if not reminder_data:
                 continue
             reminder = ReminderData(reminder_data)
-            if reminder.is_due():
+            if reminder.is_due(now):
                 self._trigger_reminder(note, reminder)
 
     @staticmethod
@@ -247,7 +271,10 @@ class ReminderManager:
             if not reminder.enabled and not reminder.completed:
                 continue
             state = ('已完成' if reminder.completed else
-                     '已到期' if reminder.is_due() or (reminder.repeat == 'once' and reminder.last_triggered and not reminder.snoozed_until) else
+                     '已通知' if reminder.repeat == 'once' and reminder.last_triggered and not reminder.snoozed_until else
+                     '已到期' if reminder.is_due() else
+                     '未触发' if reminder.snoozed_until else
+                     '等待下次周期' if reminder.repeat != 'once' and reminder.last_triggered else
                      '未触发')
             entries.append((note_id, note.note_data.get('title', f'便签 {note_id}'), state,
                             reminder.datetime_str))
@@ -255,6 +282,7 @@ class ReminderManager:
 
     def snooze(self, note_id, minutes=10):
         note = self.manager.notes[note_id]
+        self._remember(note_id, note)
         reminder = ReminderData(note.note_data.get('reminder'))
         reminder.enabled = True
         reminder.completed = False
@@ -264,11 +292,31 @@ class ReminderManager:
 
     def complete(self, note_id):
         note = self.manager.notes[note_id]
+        self._remember(note_id, note)
         reminder = ReminderData(note.note_data.get('reminder'))
         reminder.completed = True
         reminder.enabled = False
         note.note_data['reminder'] = reminder.to_dict()
         self._persist(note)
+
+    def _remember(self, note_id, note):
+        self._undo.append((note_id, copy.deepcopy(note.note_data.get('reminder'))))
+        self._undo = self._undo[-20:]
+
+    def undo_last_action(self):
+        """仅撤销本次运行中最近一次稍后提醒或完成操作。"""
+        if not self._undo:
+            return False
+        note_id, previous = self._undo.pop()
+        note = self.manager.notes.get(note_id)
+        if note is None or getattr(note, 'is_deleted', False):
+            return False
+        if previous is None:
+            note.note_data.pop('reminder', None)
+        else:
+            note.note_data['reminder'] = previous
+        self._persist(note)
+        return True
 
     def _trigger_reminder(self, note, reminder: ReminderData):
         """触发提醒通知"""
@@ -321,9 +369,12 @@ class ReminderCenterDialog(QDialog):
         self.resize(560, 420)
         layout = QVBoxLayout(self)
         self.filter = QComboBox()
-        self.filter.addItems(['全部', '未触发', '已到期', '已完成'])
+        self.filter.addItems(['全部', '未触发', '已到期', '已通知', '等待下次周期', '已完成'])
         self.filter.currentIndexChanged.connect(self.refresh)
         layout.addWidget(self.filter)
+        self.check_status = QLabel()
+        self.check_status.setAccessibleName('最近提醒检查状态')
+        layout.addWidget(self.check_status)
         self.listing = QListWidget()
         self.listing.setAccessibleName('提醒列表')
         layout.addWidget(self.listing)
@@ -331,23 +382,36 @@ class ReminderCenterDialog(QDialog):
         open_button = QPushButton('打开便签')
         snooze_button = QPushButton('稍后提醒')
         done_button = QPushButton('标记完成')
+        undo_button = QPushButton('撤销上次操作')
         refresh_button = QPushButton('刷新')
-        for button in (open_button, snooze_button, done_button, refresh_button):
+        for button in (open_button, snooze_button, done_button, undo_button, refresh_button):
             row.addWidget(button)
         layout.addLayout(row)
         open_button.clicked.connect(self.open_selected)
         snooze_button.clicked.connect(self.snooze_selected)
         done_button.clicked.connect(self.complete_selected)
+        undo_button.clicked.connect(self.undo_action)
         refresh_button.clicked.connect(self.refresh)
         self.refresh()
 
     def refresh(self):
+        reminder_manager = self.manager.reminder_manager
+        checked = getattr(reminder_manager, 'last_check_at', None)
+        self.check_status.setText(
+            f'最近检查：{checked:%Y-%m-%d %H:%M:%S} · {reminder_manager.last_check_reason}'
+            if checked else '等待启动检查'
+        )
         self.listing.clear()
         state_filter = self.filter.currentText()
         for note_id, title, state, when in self.manager.reminder_manager.list_entries():
             if state_filter != '全部' and state_filter != state:
                 continue
-            item = QListWidgetItem(f'{state} · {when} · {title}')
+            note = self.manager.notes.get(note_id)
+            reminder = note.note_data.get('reminder', {}) if note else {}
+            detail = (' · 已稍后提醒至 ' + reminder['snoozed_until']
+                      if state == '未触发' and isinstance(reminder, dict)
+                      and reminder.get('snoozed_until') else '')
+            item = QListWidgetItem(f'{state}{detail} · {when} · {title}')
             item.setData(Qt.UserRole, note_id)
             self.listing.addItem(item)
 
@@ -374,3 +438,8 @@ class ReminderCenterDialog(QDialog):
         if note_id is not None:
             self.manager.reminder_manager.complete(note_id)
             self.refresh()
+
+    def undo_action(self):
+        if not self.manager.reminder_manager.undo_last_action():
+            QMessageBox.information(self, '撤销提醒操作', '本次运行中没有可撤销的操作。')
+        self.refresh()

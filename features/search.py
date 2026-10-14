@@ -57,6 +57,50 @@ def _snippet(content, query, limit=130):
     return ('…' if start else '') + content[start:end] + ('…' if end < len(content) else '')
 
 
+class LocalNoteRecordCache:
+    """按文件修改时间增量读取本地便签；缓存异常时可重建。"""
+
+    def __init__(self):
+        self._records = {}
+
+    def clear(self):
+        self._records = {}
+
+    def records(self, notes_dir):
+        if not isinstance(self._records, dict):
+            self.clear()
+        result = []
+        seen = set()
+        if not os.path.isdir(notes_dir):
+            self.clear()
+            return result
+        for filename in os.listdir(notes_dir):
+            match = re.fullmatch(r'note_(\d+)\.json', filename)
+            if not match:
+                continue
+            note_id = int(match.group(1))
+            path = os.path.join(notes_dir, filename)
+            try:
+                stat = os.stat(path)
+                signature = (stat.st_mtime_ns, stat.st_size)
+                cached = self._records.get(note_id)
+                if not isinstance(cached, tuple) or cached[0] != signature:
+                    with open(path, encoding='utf-8') as stream:
+                        data = json.load(stream)
+                    if not isinstance(data, dict):
+                        raise ValueError('便签 JSON 不是对象')
+                    cached = (signature, data)
+                    self._records[note_id] = cached
+                result.append((note_id, cached[1], stat.st_mtime))
+                seen.add(note_id)
+            except (OSError, ValueError, TypeError) as exc:
+                self._records.pop(note_id, None)
+                logger.warning('索引便签文件 %s 时出错: %s', filename, exc)
+        for note_id in set(self._records) - seen:
+            self._records.pop(note_id, None)
+        return result
+
+
 class SearchDialog(QDialog):
     """
     便签搜索对话框
@@ -77,6 +121,9 @@ class SearchDialog(QDialog):
         super().__init__(parent)
         self.manager = manager
         self.search_results = []
+        search_manager = getattr(manager, 'search_manager', None)
+        self._record_cache = (getattr(search_manager, 'record_cache', None)
+                              or LocalNoteRecordCache())
         self.initUI()
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         # 应用主题适配
@@ -108,6 +155,7 @@ class SearchDialog(QDialog):
         search_layout = QHBoxLayout()
         search_label = QLabel('搜索:')
         self.search_input = QLineEdit()
+        self.search_input.setAccessibleName('搜索关键词')
         self.search_input.setPlaceholderText('输入关键词搜索便签标题或内容...')
         self.search_input.textChanged.connect(self.perform_search)
         search_layout.addWidget(search_label)
@@ -191,11 +239,16 @@ class SearchDialog(QDialog):
         
         # 结果统计标签
         self.result_label = QLabel('输入关键词或选择条件开始搜索')
-        self.result_label.setStyleSheet('color: #666; font-size: 12px;')
+        self.result_label.setAccessibleName('搜索结果数量')
         layout.addWidget(self.result_label)
+        self.active_filters_label = QLabel('当前条件：无')
+        self.active_filters_label.setWordWrap(True)
+        self.active_filters_label.setAccessibleName('当前搜索条件与范围')
+        layout.addWidget(self.active_filters_label)
         
         # 搜索结果列表
         self.results_list = QListWidget()
+        self.results_list.setAccessibleName('搜索结果列表')
         self.results_list.itemDoubleClicked.connect(self.open_selected_note)
         layout.addWidget(self.results_list)
         
@@ -331,6 +384,15 @@ class SearchDialog(QDialog):
         self.perform_search()
         self.search_input.setFocus()
 
+    def _filter_summary(self, query):
+        parts = [f'关键词“{query}”'] if query else []
+        controls = (self.tag_filter, self.date_filter, self.reminder_filter,
+                    self.image_filter, self.pin_filter, self.todo_filter,
+                    self.theme_filter, self.content_filter)
+        parts.extend(combo.currentText() for combo in controls if combo.currentIndex())
+        parts.append(f'范围：{self.state_filter.currentText()}')
+        return '当前条件：' + ' · '.join(parts)
+
     def _matches_filters(self, data, modified):
         tag = self.tag_filter.currentText()
         tags = data.get('tags') or []
@@ -406,6 +468,7 @@ class SearchDialog(QDialog):
         if not isinstance(query, str):
             query = self.search_input.text()
         query = query.strip()
+        self.active_filters_label.setText(self._filter_summary(query))
         has_filter = any(combo.currentIndex() for combo in (
             self.tag_filter, self.date_kind, self.date_filter, self.reminder_filter,
             self.image_filter, self.pin_filter, self.state_filter, self.todo_filter,
@@ -423,21 +486,9 @@ class SearchDialog(QDialog):
             modified = os.path.getmtime(note_file) if os.path.isfile(note_file) else time.time()
             records.append((note_id, note.note_data, True, modified))
             seen.add(note_id)
-        if os.path.isdir(self.manager.notes_dir):
-            for filename in os.listdir(self.manager.notes_dir):
-                match = re.fullmatch(r'note_(\d+)\.json', filename)
-                if not match:
-                    continue
-                note_id = int(match.group(1))
-                if note_id in seen:
-                    continue
-                note_file = os.path.join(self.manager.notes_dir, filename)
-                try:
-                    with open(note_file, encoding='utf-8') as stream:
-                        data = json.load(stream)
-                    records.append((note_id, data, False, os.path.getmtime(note_file)))
-                except (OSError, ValueError, TypeError) as exc:
-                    logger.warning('搜索便签文件 %s 时出错: %s', filename, exc)
+        for note_id, data, modified in self._record_cache.records(self.manager.notes_dir):
+            if note_id not in seen:
+                records.append((note_id, data, False, modified))
         for note_id, data, opened, modified in records:
             title = str(data.get('title', ''))
             content = _plain_content(data)
@@ -598,39 +649,32 @@ class SearchManager:
         """
         self.manager = manager
         self.search_dialog = None
+        self.record_cache = LocalNoteRecordCache()
         self._note_index: dict = {}  # {note_id: {'title': str, 'content': str, 'tags': list}}
         self._index_built = False
         self._build_or_refresh_index()
 
     def _build_or_refresh_index(self):
-        """构建或刷新搜索索引，缓存所有便签的标题和内容"""
-        self._note_index.clear()
-        notes_dir = self.manager.notes_dir
-        if not os.path.exists(notes_dir):
-            self._index_built = True
-            return
-        for filename in os.listdir(notes_dir):
-            if filename.startswith('note_') and filename.endswith('.json'):
-                try:
-                    note_id_str = filename.split('_')[1].split('.')[0]
-                    note_id = int(note_id_str)
-                    note_file = os.path.join(notes_dir, filename)
-                    with open(note_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    self._note_index[note_id] = {
-                        'title': data.get('title', '').lower(),
-                        'content': _plain_content(data).lower(),
-                        'tags': data.get('tags', []),
-                        'archived': bool(data.get('archived')),
-                    }
-                except Exception as e:
-                    logger.debug(f'索引便签 {filename} 时出错: {e}')
+        """增量刷新本地索引，损坏条目从原始 JSON 重建。"""
+        self._note_index = {}
+        for note_id, data, _modified in self.record_cache.records(self.manager.notes_dir):
+            self._note_index[note_id] = {
+                'title': str(data.get('title', '')).casefold(),
+                'content': _plain_content(data).casefold(),
+                'tags': data.get('tags', []),
+                'archived': bool(data.get('archived')),
+            }
         self._index_built = True
 
     def refresh_index(self):
         """刷新搜索索引（便签变更后调用）"""
         self._build_or_refresh_index()
     
+    def rebuild_index(self):
+        """从本地原始便签文件重建可丢弃的索引。"""
+        self.record_cache.clear()
+        self._build_or_refresh_index()
+
     def show_search_dialog(self):
         """
         显示搜索对话框
@@ -659,8 +703,7 @@ class SearchManager:
             return results
 
         # 确保索引已构建
-        if not self._index_built:
-            self._build_or_refresh_index()
+        self._build_or_refresh_index()
 
         # 搜索已打开的便签
         for note_id, note in self.manager.notes.items():

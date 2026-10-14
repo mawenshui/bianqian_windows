@@ -59,6 +59,35 @@ from features.updater import (
 )
 
 
+def fit_layout_geometry(saved, screens):
+    """将旧版或带屏幕信息的预设映射到当前可见屏幕。"""
+    geometry = saved.get('geometry') if isinstance(saved, dict) else saved
+    if not isinstance(geometry, (list, tuple)) or len(geometry) != 4:
+        raise ValueError('布局坐标无效')
+    x, y, width, height = map(int, geometry)
+    if width <= 0 or height <= 0 or not screens:
+        raise ValueError('布局尺寸或屏幕无效')
+    center_x, center_y = x + width // 2, y + height // 2
+    screen = next((area for area in screens if area.contains(center_x, center_y)), None)
+    if screen is None:
+        screen = min(screens, key=lambda area:
+                     (area.center().x() - center_x) ** 2 +
+                     (area.center().y() - center_y) ** 2)
+    source = saved.get('screen') if isinstance(saved, dict) else None
+    if isinstance(source, (list, tuple)) and len(source) == 4:
+        sx, sy, sw, sh = map(int, source)
+        if sw > 0 and sh > 0:
+            x = screen.x() + round((x - sx) * screen.width() / sw)
+            y = screen.y() + round((y - sy) * screen.height() / sh)
+            width = round(width * screen.width() / sw)
+            height = round(height * screen.height() / sh)
+    width = min(max(width, 200), screen.width())
+    height = min(max(height, 100), screen.height())
+    x = max(screen.left(), min(x, screen.right() - width + 1))
+    y = max(screen.top(), min(y, screen.bottom() - height + 1))
+    return x, y, width, height
+
+
 class StickyNoteManager:
     """
     桌面便签应用管理器
@@ -95,7 +124,6 @@ class StickyNoteManager:
         self.config = get_config()
         self.settings = self.config.get_all()  # 保持向后兼容的快捷访问
         self.settings_file = self.config._settings_file  # 桥接给 feature 模块使用
-        self.lifecycle.cleanup(self.config.get('trash_retention_days', 30))
         self.sync_engine = None
         
         if 'font' not in self.settings:
@@ -138,6 +166,7 @@ class StickyNoteManager:
         self._loaded_note_count = 0
         self._total_note_files = 0
         self.load_notes()
+        QTimer.singleShot(2000, self.cleanup_trash)
 
         self.settings_dialog = None
         self._help_dialog = None
@@ -358,6 +387,27 @@ class StickyNoteManager:
     def show_lifecycle_dialog(self) -> None:
         NoteLifecycleDialog.show(self)
 
+    def cleanup_trash(self, retention_days=None):
+        """到期清理前创建可校验的本地安全备份。"""
+        days = (self.config.get('trash_retention_days', 30)
+                if retention_days is None else retention_days)
+        try:
+            report = self.lifecycle.preview_cleanup(days)
+            if not report['notes']:
+                return 0
+            from datetime import datetime
+            import uuid
+            name = f'pre_trash_cleanup_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}'
+            def safety_backup():
+                path = self.backup_manager.create_backup(name)
+                return bool(path and self.backup_manager.preview_backup(path)['valid'])
+            count = self.lifecycle.cleanup(days, safety_backup=safety_backup)
+            logger.info('到期回收站清理 %s 条，安全备份 %s', count, name)
+            return count
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning('回收站到期清理已中止: %s', exc)
+            return 0
+
     def show_reminder_center(self) -> None:
         ReminderCenterDialog(self).exec_()
 
@@ -369,10 +419,14 @@ class StickyNoteManager:
         presets = self.config.get('layout_presets', {})
         if not isinstance(presets, dict):
             presets = {}
-        presets[name] = {
-            str(note_id): [note.x(), note.y(), note.width(), note.height()]
-            for note_id, note in self.notes.items()
-        }
+        presets[name] = {}
+        for note_id, note in self.notes.items():
+            screen = self.app.screenAt(note.geometry().center()) or self.app.primaryScreen()
+            area = screen.availableGeometry()
+            presets[name][str(note_id)] = {
+                'geometry': [note.x(), note.y(), note.width(), note.height()],
+                'screen': [area.x(), area.y(), area.width(), area.height()],
+            }
         self.config.set('layout_presets', presets)
 
     def restore_layout_preset(self):
@@ -394,14 +448,9 @@ class StickyNoteManager:
         for key, geometry in presets[name].items():
             try:
                 note = self.notes.get(int(key))
-                if note is None or len(geometry) != 4:
+                if note is None:
                     continue
-                x, y, width, height = map(int, geometry)
-                screen = next((area for area in screens if area.contains(x, y)), screens[0])
-                width = min(max(width, 200), screen.width())
-                height = min(max(height, 100), screen.height())
-                x = max(screen.left(), min(x, screen.right() - width + 1))
-                y = max(screen.top(), min(y, screen.bottom() - height + 1))
+                x, y, width, height = fit_layout_geometry(geometry, screens)
                 note.setGeometry(x, y, width, height)
                 note.save_note()
             except (ValueError, TypeError):
@@ -444,10 +493,12 @@ class StickyNoteManager:
         add_action = QAction("\u6dfb\u52a0\u4fbf\u7b7e (Ctrl+Shift+N)", self.app)
         add_action.triggered.connect(self.add_note)
         self.tray_menu.addAction(add_action)
-        quick_action = QAction('快速记录...', self.app)
+        quick_action = QAction('快速记录（输入文字）...', self.app)
+        quick_action.setStatusTip('打开输入框；不会读取剪贴板')
         quick_action.triggered.connect(self.quick_capture)
         self.tray_menu.addAction(quick_action)
-        clipboard_action = QAction('从剪贴板快速记录...', self.app)
+        clipboard_action = QAction('快速记录（从剪贴板）...', self.app)
+        clipboard_action.setStatusTip('仅点击此项时读取剪贴板')
         clipboard_action.triggered.connect(lambda: self.quick_capture(True))
         self.tray_menu.addAction(clipboard_action)
 

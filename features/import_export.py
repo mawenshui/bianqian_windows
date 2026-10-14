@@ -24,6 +24,19 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from features.search import _plain_content
 
 
+def format_checklist(checklist, markdown=False):
+    """为文本导出和预览生成清单，正文始终保持独立。"""
+    lines = []
+    for entry in checklist if isinstance(checklist, list) else []:
+        if isinstance(entry, dict):
+            text = str(entry.get('text', '')).strip()
+            if text:
+                mark = 'x' if entry.get('done') else ' '
+                lines.append(f'- [{mark}] {text}' if markdown else
+                             f'{"☑" if entry.get("done") else "☐"} {text}')
+    return '\n'.join(lines)
+
+
 def preview_txt_import(filepaths, existing_notes):
     """读取导入文件并标记重复项；读取失败不会阻止其他文件。"""
     existing = {
@@ -69,7 +82,9 @@ class ExportWorker(QThread):
         try:
             total = len(self.export_items)
             filenames = []
-            for i, (note_id, title, content) in enumerate(self.export_items):
+            for i, entry in enumerate(self.export_items):
+                note_id, title, content = entry[:3]
+                checklist = entry[3] if len(entry) > 3 else []
                 safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
                 if not safe_title:
                     safe_title = f'note_{note_id}'
@@ -85,9 +100,15 @@ class ExportWorker(QThread):
                         f.write(f'# {title}\n\n')
                         f.write(f'> 便签 ID: {note_id}\n\n')
                         f.write(content)
+                        checklist_text = format_checklist(checklist, True)
+                        if checklist_text:
+                            f.write(f'\n\n## 清单\n\n{checklist_text}\n')
                     else:
                         f.write(f'{title}\n{"=" * len(title)}\n\n')
                         f.write(content)
+                        checklist_text = format_checklist(checklist)
+                        if checklist_text:
+                            f.write(f'\n\n清单\n{checklist_text}\n')
                 filenames.append(filepath)
                 self.progress.emit(int((i + 1) / total * 100), f'{i+1}/{total}')
 
@@ -221,7 +242,8 @@ class ImportExportDialog(QDialog):
             if note:
                 title = note.note_data.get('title', f'便签 {note_id}')
                 content = note.text_edit.toPlainText()
-                items.append((note_id, title, content))
+                items.append((note_id, title, content,
+                              note.note_data.get('checklist', [])))
 
         self.export_progress.setVisible(True)
         self.export_progress.setValue(0)

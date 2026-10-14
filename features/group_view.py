@@ -212,10 +212,15 @@ class GroupViewDialog(QDialog):
                                        'QListWidget:focus { border: 2px solid #174ea6; }')
         self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # 多选
         self.list_widget.itemDoubleClicked.connect(self._on_list_item_clicked)
+        self.list_widget.itemSelectionChanged.connect(self._update_selection_status)
         self.stack.addWidget(self.list_widget)
         self.stack.setCurrentIndex(self.view_combo.currentIndex())
 
         main_layout.addWidget(self.stack)
+
+        self.selection_status = QLabel('已选 0 个便签')
+        self.selection_status.setAccessibleName('批量操作选中数量与结果')
+        main_layout.addWidget(self.selection_status)
 
         # 底部按钮
         btn_layout = QHBoxLayout()
@@ -467,6 +472,14 @@ class GroupViewDialog(QDialog):
             return [item.data(Qt.UserRole) for item in items if item.data(Qt.UserRole) is not None]
         return []
 
+    def _update_selection_status(self):
+        self.selection_status.setText(f'已选 {len(self._get_selected_note_ids())} 个便签')
+
+    def _batch_result(self, action, selected, count):
+        self._refresh_views()
+        self.selection_status.setText(
+            f'{action}：选中 {selected} 个，成功 {count} 个，未处理 {selected - count} 个')
+
     def _batch_delete(self):
         """批量删除选中的便签"""
         note_ids = self._get_selected_note_ids()
@@ -479,8 +492,8 @@ class GroupViewDialog(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes and self.manager:
-            self.manager.batch_delete_notes(note_ids)
-            self._refresh_views()
+            count = self.manager.batch_delete_notes(note_ids)
+            self._batch_result('移至回收站', len(note_ids), count)
 
     def _batch_archive(self):
         note_ids = self._get_selected_note_ids()
@@ -488,8 +501,12 @@ class GroupViewDialog(QDialog):
             QMessageBox.information(self, '提示', '请先在列表视图中选择便签')
             return
         if self.manager:
-            self.manager.batch_archive_notes(note_ids)
-            self._refresh_views()
+            if QMessageBox.question(self, '批量归档',
+                                    f'归档选中的 {len(note_ids)} 个便签？',
+                                    QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No) == QMessageBox.Yes:
+                count = self.manager.batch_archive_notes(note_ids)
+                self._batch_result('归档', len(note_ids), count)
 
     def _batch_pin(self):
         note_ids = self._get_selected_note_ids()
@@ -497,8 +514,8 @@ class GroupViewDialog(QDialog):
             choice, ok = QInputDialog.getItem(self, '批量置顶', '操作:',
                                               ['置顶', '取消置顶'], 0, False)
             if ok:
-                self.manager.batch_set_pin(note_ids, choice == '置顶')
-                self._refresh_views()
+                count = self.manager.batch_set_pin(note_ids, choice == '置顶')
+                self._batch_result(choice, len(note_ids), count)
 
     def _batch_theme(self):
         note_ids = self._get_selected_note_ids()
@@ -508,8 +525,8 @@ class GroupViewDialog(QDialog):
         themes = sorted(name for name in os.listdir(get_styles_dir()) if name.endswith('.css'))
         theme, ok = QInputDialog.getItem(self, '批量颜色', '主题:', themes, 0, False)
         if ok and theme:
-            self.manager.batch_set_theme(note_ids, theme)
-            self._refresh_views()
+            count = self.manager.batch_set_theme(note_ids, theme)
+            self._batch_result('更换主题', len(note_ids), count)
 
     def _batch_tag(self):
         """批量添加标签"""
@@ -519,8 +536,8 @@ class GroupViewDialog(QDialog):
             return
         tag_name, ok = QInputDialog.getText(self, '批量标签', '输入标签名称:')
         if ok and tag_name.strip() and self.manager:
-            self.manager.batch_tag_notes(note_ids, tag_name.strip())
-            self._refresh_views()
+            count = self.manager.batch_tag_notes(note_ids, tag_name.strip())
+            self._batch_result('添加标签', len(note_ids), count)
 
     def _batch_export(self):
         """批量导出便签"""
@@ -531,4 +548,5 @@ class GroupViewDialog(QDialog):
         export_dir = QFileDialog.getExistingDirectory(self, '选择导出目录')
         if export_dir and self.manager:
             count = self.manager.batch_export_notes(note_ids, export_dir)
+            self._batch_result('导出', len(note_ids), count)
             QMessageBox.information(self, '导出完成', f'成功导出 {count} 个便签到:\n{export_dir}')

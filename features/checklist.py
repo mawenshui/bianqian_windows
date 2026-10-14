@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """便签内的本地复选框清单。"""
 
+import copy
+import re
+
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QApplication, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QVBoxLayout, QWidget,
 )
 
@@ -18,6 +21,8 @@ class ChecklistWidget(QWidget):
             if isinstance(item, dict)
         ]
         self._show_completed = True
+        self._undo = []
+        self._redo = []
         self.setAccessibleName('便签清单')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(3, 3, 3, 3)
@@ -38,14 +43,74 @@ class ChecklistWidget(QWidget):
         remove_button = QPushButton('删除选中')
         remove_button.clicked.connect(self.remove_selected)
         row.addWidget(remove_button)
+        undo_button = QPushButton('撤销清单')
+        undo_button.clicked.connect(self.undo)
+        row.addWidget(undo_button)
+        redo_button = QPushButton('重做清单')
+        redo_button.clicked.connect(self.redo)
+        row.addWidget(redo_button)
         self.toggle_button = QPushButton('折叠已完成')
         self.toggle_button.clicked.connect(self.toggle_completed)
         row.addWidget(self.toggle_button)
         layout.addLayout(row)
+        transfer = QHBoxLayout()
+        copy_button = QPushButton('复制选中')
+        copy_button.clicked.connect(self.copy_selected)
+        transfer.addWidget(copy_button)
+        paste_button = QPushButton('粘贴项目')
+        paste_button.clicked.connect(self.paste_items)
+        transfer.addWidget(paste_button)
+        layout.addLayout(transfer)
         self.refresh()
 
+    def _remember(self):
+        self._undo.append(copy.deepcopy(self._items))
+        self._undo = self._undo[-50:]
+        self._redo.clear()
+
+    def undo(self):
+        if not self._undo:
+            return False
+        self._redo.append(copy.deepcopy(self._items))
+        self._items = self._undo.pop()
+        self._persist()
+        self.refresh()
+        return True
+
+    def redo(self):
+        if not self._redo:
+            return False
+        self._undo.append(copy.deepcopy(self._items))
+        self._items = self._redo.pop()
+        self._persist()
+        self.refresh()
+        return True
+
+    def copy_selected(self):
+        selected = self.list_widget.selectedItems()
+        if selected:
+            lines = []
+            for item in selected:
+                entry = self._items[item.data(Qt.UserRole)]
+                lines.append(f'- [{"x" if entry["done"] else " "}] {entry["text"]}')
+            QApplication.clipboard().setText('\n'.join(lines))
+
+    def paste_items(self):
+        """只在显式点击粘贴时读取剪贴板；最多接受 100 行。"""
+        pasted = []
+        for line in QApplication.clipboard().text().splitlines()[:100]:
+            match = re.fullmatch(r'\s*[-*]\s*\[([ xX])\]\s*(.+)', line)
+            text = match.group(2).strip() if match else line.strip()
+            if text:
+                pasted.append({'text': text[:500], 'done': bool(match and match.group(1).lower() == 'x')})
+        if pasted:
+            self._remember()
+            self._items.extend(pasted)
+            self._persist()
+            self.refresh()
+
     def _persist(self):
-        self.note.note_data['checklist'] = list(self._items)
+        self.note.note_data['checklist'] = copy.deepcopy(self._items)
         if not self.note.is_deleted:
             self.note.save_note()
 
@@ -72,6 +137,7 @@ class ChecklistWidget(QWidget):
         text = self.input.text().strip()
         if not text:
             return
+        self._remember()
         self._items.append({'text': text, 'done': False})
         self.input.clear()
         self._persist()
@@ -82,6 +148,7 @@ class ChecklistWidget(QWidget):
         if not selected:
             return
         index = selected[0].data(Qt.UserRole)
+        self._remember()
         del self._items[index]
         self._persist()
         self.refresh()
@@ -97,8 +164,12 @@ class ChecklistWidget(QWidget):
         text = item.text().strip()
         if not text:
             text = self._items[index]['text']
-        self._items[index] = {
+        updated = {
             'text': text, 'done': item.checkState() == Qt.Checked
         }
+        if updated == self._items[index]:
+            return
+        self._remember()
+        self._items[index] = updated
         self._persist()
         QTimer.singleShot(0, self.refresh)

@@ -103,7 +103,11 @@ class RestoreWorker(QThread):
             else:
                 self.restore_failed.emit("恢复操作失败")
         except Exception as e:
-            self.restore_failed.emit(str(e))
+            safety = getattr(self.backup_manager, 'last_safety_backup_path', None)
+            detail = f'恢复步骤: {e}'
+            if safety:
+                detail += f'\n恢复前安全备份: {safety}'
+            self.restore_failed.emit(detail)
 
 
 class BackupDialog(QDialog):
@@ -389,6 +393,7 @@ class BackupDialog(QDialog):
         
         item = selected_items[0]
         backup_path = item.data(Qt.UserRole)
+        self.backup_manager.flush_open_notes()
         preview = self.backup_manager.preview_backup(backup_path)
         if not preview['valid']:
             QMessageBox.warning(self, '备份不可恢复', '; '.join(preview['errors']))
@@ -398,6 +403,10 @@ class BackupDialog(QDialog):
             f'备份时间: {preview["created_at"]}\n'
             f'便签: {preview["note_count"]}，回收站: {preview["trash_count"]}，'
             f'主题: {preview["style_count"]}\n'
+            f'便签差异: 新增 {preview["new_count"]}、覆盖 {preview["overwrite_count"]}、'
+            f'内容相同 {preview["skipped_count"]}、仅当前存在 {preview["removed_count"]}\n'
+            f'附件: {preview["attachment_count"]} 个，'
+            f'{preview["attachment_bytes"] / 1024 / 1024:.1f} MB\n'
             f'校验: {preview["verification"]} 通过\n\n'
             '恢复前会自动保存当前数据的安全备份。继续恢复吗？',
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
@@ -650,7 +659,9 @@ class BackupManager:
         result = {
             'valid': False, 'errors': [], 'note_count': 0, 'trash_count': 0,
             'style_count': 0, 'titles': [], 'created_at': '',
-            'verification': 'CRC',
+            'verification': 'CRC', 'new_count': 0, 'overwrite_count': 0,
+            'skipped_count': 0, 'removed_count': 0,
+            'attachment_count': 0, 'attachment_bytes': 0,
         }
         try:
             with zipfile.ZipFile(backup_path) as archive:
@@ -748,6 +759,31 @@ class BackupManager:
                                     result['errors'].append(f'附件缺失: {member}')
                     elif name.startswith('styles/'):
                         result['style_count'] += 1
+                    if '/attachments/' in name:
+                        result['attachment_count'] += 1
+                        result['attachment_bytes'] += archive.getinfo(name).file_size
+                if not result['errors']:
+                    archived_notes = {
+                        name for name in names if re.fullmatch(r'notes/note_\d+\.json', name)
+                    }
+                    current_notes = set()
+                    if os.path.isdir(self.manager.notes_dir):
+                        current_notes = {
+                            f'notes/{name}' for name in os.listdir(self.manager.notes_dir)
+                            if re.fullmatch(r'note_\d+\.json', name)
+                        }
+                    for name in archived_notes:
+                        current = os.path.join(self.manager.notes_dir, name.split('/', 1)[1])
+                        if not os.path.isfile(current):
+                            result['new_count'] += 1
+                        else:
+                            with open(current, 'rb') as stream:
+                                same = hashlib.sha256(stream.read()).digest() == hashlib.sha256(
+                                    archive.read(name)
+                                ).digest()
+                            result['skipped_count' if same else 'overwrite_count'] += 1
+                    if archived_notes:
+                        result['removed_count'] = len(current_notes - archived_notes)
                 if not result['created_at']:
                     result['created_at'] = datetime.fromtimestamp(
                         os.path.getmtime(backup_path)
@@ -761,6 +797,7 @@ class BackupManager:
 
     def restore_backup_internal(self, backup_path, progress_callback=None):
         """校验、预备份、分阶段替换；异常时恢复原文件。"""
+        self.last_safety_backup_path = None
         preview = self.preview_backup(backup_path)
         if not preview['valid']:
             raise ValueError('备份校验失败: ' + '; '.join(preview['errors']))
@@ -768,6 +805,7 @@ class BackupManager:
         safety_path = self.create_backup_internal(safety_name)
         if not safety_path or not self.preview_backup(safety_path)['valid']:
             raise RuntimeError('恢复前安全备份失败，未修改当前数据')
+        self.last_safety_backup_path = safety_path
         if progress_callback:
             progress_callback.emit(20)
         with tempfile.TemporaryDirectory(prefix='restore_', dir=self.backup_dir) as temporary:
