@@ -16,6 +16,7 @@ import copy
 import ctypes
 import shutil
 import tempfile
+from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -35,6 +36,7 @@ from features.positioning import get_position_manager
 from features.formatter import ContentFormatter
 from features.tag import TagChipWidget
 from features.richtext import RichTextActions
+from features.checklist import ChecklistWidget
 from core import get_styles_dir, __version__
 from core.ui_preferences import (
     DEFAULT_SETTINGS_TOOL_ORDER, SETTINGS_TOOL_ORDER_KEY,
@@ -317,6 +319,13 @@ def _make_vector_icon(kind: str, color: str = '#334155', size: int = 20, monochr
         path.lineTo(size * .69, size * .52)
         path.lineTo(size * .84, size * .73)
         painter.drawPath(path)
+    elif kind == 'attachment':
+        path = QPainterPath()
+        path.moveTo(size * .63, size * .24)
+        path.cubicTo(size * .88, size * .36, size * .78, size * .63, size * .59, size * .77)
+        path.cubicTo(size * .35, size * .94, size * .12, size * .69, size * .28, size * .47)
+        path.lineTo(size * .54, size * .21)
+        painter.drawPath(path)
     elif kind == 'backlink':
         painter.drawLine(int(size * .23), int(size * .50), int(size * .80), int(size * .50))
         painter.drawLine(int(size * .23), int(size * .50), int(size * .42), int(size * .31))
@@ -528,11 +537,24 @@ class NoteSaveWorker(QThread):
 
     def run(self):
         try:
-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-            with open(self.file_path, 'w', encoding='utf-8') as f:
-                json.dump(self.note_data, f, ensure_ascii=False, indent=4)
+            _atomic_write_note(self.file_path, self.note_data)
         except Exception as e:
             print(f"[NoteSaveWorker] 保存失败: {self.file_path} - {e}")
+
+
+def _atomic_write_note(path, data):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix='.note_', suffix='.tmp', dir=directory)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=4)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 class NoteLoadWorker(QThread):
@@ -590,6 +612,10 @@ class PlainTextEdit(UndoRedoTextEdit):
 
     def paste(self):
         clipboard = QApplication.clipboard()
+        source = clipboard.mimeData()
+        if source and (source.hasImage() or source.hasUrls()):
+            self.insertFromMimeData(source)
+            return
         if self.auto_format_enabled:
             text = clipboard.text()
             formatted_text, content_type = self.formatter.format_content(text)
@@ -601,6 +627,17 @@ class PlainTextEdit(UndoRedoTextEdit):
             self.insertPlainText(clipboard.text())
 
     def insertFromMimeData(self, source: QMimeData):
+        if source.hasUrls():
+            files = [url.toLocalFile() for url in source.urls() if url.isLocalFile()]
+            owner = self.window()
+            if files and hasattr(owner, 'add_attachment_files'):
+                owner.add_attachment_files(files)
+                return
+        if source.hasImage():
+            owner = self.window()
+            if hasattr(owner, 'add_pasted_image'):
+                owner.add_pasted_image(source.imageData())
+                return
         if source.hasText() and self.auto_format_enabled:
             text = source.text()
             formatted_text, content_type = self.formatter.format_content(text)
@@ -786,6 +823,8 @@ class StickyNote(QWidget):
         else:
             self.text_edit.setText(content)
         self.text_edit.textChanged.connect(self.update_content)
+        self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_edit.customContextMenuRequested.connect(self._show_editor_context_menu)
 
         # Rich text actions 封装
         self.rich_text = RichTextActions(self.text_edit)
@@ -809,6 +848,12 @@ class StickyNote(QWidget):
         ''')
         self.editor_stack.addWidget(self.md_preview)  # page 1: Markdown 预览
         main_layout.addWidget(self.editor_stack)
+
+        self.checklist_widget = ChecklistWidget(self)
+        self.checklist_widget.setVisible(
+            bool(self.note_data.get('checklist_visible') or self.note_data.get('checklist'))
+        )
+        main_layout.addWidget(self.checklist_widget)
 
         # 撤销/重做管理器
         self.undo_redo_manager = UndoRedoManager(self.title_edit, self.text_edit)
@@ -934,6 +979,13 @@ class StickyNote(QWidget):
         self.unordered_list_btn.clicked.connect(self.rich_text.insert_unordered_list)
         font_layout.addWidget(self.unordered_list_btn)
 
+        self.checklist_btn = QPushButton('☑')
+        self.checklist_btn.setToolTip('显示或隐藏复选框清单')
+        self.checklist_btn.setAccessibleName('显示或隐藏复选框清单')
+        self.checklist_btn.setFixedSize(30, 30)
+        self.checklist_btn.clicked.connect(self.toggle_checklist)
+        font_layout.addWidget(self.checklist_btn)
+
         # 高亮
         self.separator7 = QLabel('|')
         font_layout.addWidget(self.separator7)
@@ -973,7 +1025,7 @@ class StickyNote(QWidget):
             ('formatAlignmentGroup', '文本对齐',
              (self.align_left_btn, self.align_center_btn, self.align_right_btn)),
             ('formatListGroup', '列表',
-             (self.ordered_list_btn, self.unordered_list_btn)),
+             (self.ordered_list_btn, self.unordered_list_btn, self.checklist_btn)),
             ('formatHighlightGroup', '高亮',
              (self.highlight_btn, self.clear_highlight_btn)),
         )
@@ -1190,6 +1242,14 @@ class StickyNote(QWidget):
         self.image_btn.setFixedSize(36, 30)
         self.image_btn.clicked.connect(self._insert_image_dialog)
         buttons_layout.addWidget(self.image_btn)
+        self.attachment_btn = QPushButton('📎')
+        self.attachment_btn.setToolTip('管理本地附件')
+        self.attachment_btn.setAccessibleName('管理本地附件')
+        self.attachment_btn.setFixedSize(36, 30)
+        self.attachment_btn.clicked.connect(self.manage_attachments)
+        buttons_layout.addWidget(self.attachment_btn)
+        self.attachment_btn.setFixedSize(34, TOOL_BUTTON_HEIGHT)
+        self.format_tool_groups[6].layout().addWidget(self.attachment_btn)
         
         # Markdown 预览切换
         self.md_toggle_btn = QPushButton('MD')
@@ -1613,6 +1673,7 @@ class StickyNote(QWidget):
                          '解锁便签' if self.is_locked else '锁定便签'),
             'link_btn': ('link', '插入链接'),
             'image_btn': ('image', '插入图片'),
+            'attachment_btn': ('attachment', '管理本地附件'),
             'background_btn': ('background', '选择便签背景图片'),
             'clear_background_btn': ('clear_background', '清除便签背景图片'),
             'background_text_color_btn': ('font_color', '设置背景图默认文字色'),
@@ -1660,6 +1721,8 @@ class StickyNote(QWidget):
             ):
                 button.setText('')
             button.setToolTip(description)
+        if hasattr(self, 'attachment_btn'):
+            self._update_attachment_button()
         if hasattr(self, 'clear_background_btn'):
             self.clear_background_btn.setEnabled(self._has_background_image())
         background_active = self._has_background_image()
@@ -1697,7 +1760,8 @@ class StickyNote(QWidget):
             'subscript_btn', 'align_left_btn', 'align_center_btn', 'align_right_btn',
             'ordered_list_btn', 'unordered_list_btn', 'highlight_btn',
             'clear_highlight_btn', 'undo_btn', 'redo_btn', 'tag_btn',
-            'reminder_btn', 'lock_btn', 'link_btn', 'image_btn', 'md_toggle_btn',
+            'reminder_btn', 'lock_btn', 'link_btn', 'image_btn', 'attachment_btn',
+            'md_toggle_btn',
             'backlink_btn', 'delete_btn', 'help_btn', 'hide_btn',
         ]
         actions = []
@@ -2582,7 +2646,8 @@ class StickyNote(QWidget):
 
         # 功能按钮（撤销/重做/标签/提醒/锁定/链接/图片/MD/反链/删除/帮助/隐藏）
         for btn in ['undo_btn', 'redo_btn', 'tag_btn', 'reminder_btn',
-                     'lock_btn', 'link_btn', 'image_btn', 'md_toggle_btn',
+                     'lock_btn', 'link_btn', 'image_btn', 'attachment_btn',
+                     'md_toggle_btn',
                      'backlink_btn', 'help_btn', 'hide_btn', 'background_btn',
                      'clear_background_btn', 'background_text_color_btn',
                      'background_control_color_btn', 'reset_background_colors_btn']:
@@ -3031,7 +3096,12 @@ class StickyNote(QWidget):
             'font_color_mode': 'theme',
             'advanced_toolbar_visible': False,
             'edit_mode': 'richtext',
-            'markdown_content': ''
+            'markdown_content': '',
+            'archived': False,
+            'checklist': [],
+            'checklist_visible': False,
+            'attachments': [],
+            'created_at': datetime.now().isoformat(timespec='seconds'),
         }
 
     def save_note(self):
@@ -3074,6 +3144,8 @@ class StickyNote(QWidget):
         if hasattr(self, 'font_settings') and self.font_settings:
             self.note_data['font_settings'] = self.font_settings
         self.note_data['auto_format_enabled'] = self.format_checkbox.isChecked()
+        self.note_data['checklist_visible'] = not self.checklist_widget.isHidden()
+        self.note_data['updated_at'] = datetime.now().isoformat(timespec='seconds')
 
         # 防抖：重置定时器，500ms 内无新调用才真正写入磁盘
         self._save_timer.start(SAVE_DEBOUNCE_MS)
@@ -3088,6 +3160,9 @@ class StickyNote(QWidget):
             return
         try:
             # 深拷贝数据，避免后台线程访问时数据被修改
+            previous = getattr(self, '_save_worker', None)
+            if previous is not None and previous.isRunning():
+                previous.wait()
             data_copy = copy.deepcopy(self.note_data)
             self._save_worker = NoteSaveWorker(data_copy, self.note_file)
             self._save_worker.start()
@@ -3106,9 +3181,10 @@ class StickyNote(QWidget):
         # 立即停止防抖并同步写入
         self._save_timer.stop()
         try:
-            os.makedirs(os.path.dirname(self.note_file), exist_ok=True)
-            with open(self.note_file, 'w', encoding='utf-8') as f:
-                json.dump(self.note_data, f, ensure_ascii=False, indent=4)
+            worker = getattr(self, '_save_worker', None)
+            if worker is not None and worker.isRunning():
+                worker.wait()
+            _atomic_write_note(self.note_file, self.note_data)
         except Exception as e:
             print(f"[StickyNote] 同步保存失败: {e}")
 
@@ -3122,6 +3198,11 @@ class StickyNote(QWidget):
             self.manager.update_tray_menu()
 
     def update_content(self):
+        if not self.is_deleted:
+            self.save_note()
+
+    def toggle_checklist(self):
+        self.checklist_widget.setVisible(not self.checklist_widget.isVisible())
         if not self.is_deleted:
             self.save_note()
 
@@ -3149,40 +3230,25 @@ class StickyNote(QWidget):
 
     def delete_note(self):
         reply = QMessageBox.question(
-            self, '\u5220\u9664\u4fbf\u7b7e',
-            f"\u786e\u5b9a\u8981\u5220\u9664\u4fbf\u7b7e '{self.note_data.get('title', '')}' \u5417\uff1f",
+            self, '移至回收站',
+            f"将便签 '{self.note_data.get('title', '')}' 移至回收站？",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
             try:
-                # 清理贴边隐藏标签页
-                if self.hide_tab is not None:
-                    try:
-                        self.hide_tab.removeEventFilter(self)
-                        self.hide_tab.close()
-                    except Exception:
-                        logger.debug('关闭隐藏标签页时出错', exc_info=True)
-                    self.hide_tab = None
-                self.auto_hidden = False
-        
-                print(f"尝试删除文件: {self.note_file}")
-                if os.path.exists(self.note_file):
-                    try:
-                        with open(self.note_file, 'a'):
-                            pass
-                    except Exception as e:
-                        QMessageBox.warning(self, '\u5220\u9664\u5931\u8d25', f'\u6587\u4ef6\u88ab\u5360\u7528\uff0c\u65e0\u6cd5\u5220\u9664: {e}')
-                        return
-                    os.remove(self.note_file)
-                    QMessageBox.information(self, '\u5220\u9664\u6210\u529f', '\u4fbf\u7b7e\u53ca\u5176\u6587\u4ef6\u5df2\u88ab\u5220\u9664\u3002')
-                else:
-                    QMessageBox.warning(self, '\u5220\u9664\u5931\u8d25', '\u4fbf\u7b7e\u6587\u4ef6\u4e0d\u5b58\u5728\u3002')
                 if self.manager:
-                    self.manager.remove_note(self.note_id)
-                self.is_deleted = True
-                self.close()
+                    self.manager.trash_note(self.note_id)
+                else:
+                    raise RuntimeError('缺少便签管理器，无法安全移动到回收站')
             except Exception as e:
-                QMessageBox.warning(self, '\u5220\u9664\u9519\u8bef', f'\u65e0\u6cd5\u5220\u9664\u4fbf\u7b7e\u6587\u4ef6: {e}')
+                QMessageBox.warning(self, '删除失败', f'无法移动便签到回收站: {e}')
+
+    def archive_note(self):
+        if self.manager:
+            try:
+                self.manager.archive_note(self.note_id)
+            except Exception as exc:
+                QMessageBox.warning(self, '归档失败', str(exc))
 
     def showEvent(self, event):
         """窗口显示时播放淡入动画，并恢复保存的位置"""
@@ -3300,6 +3366,150 @@ class StickyNote(QWidget):
             )
             if not self.is_deleted:
                 self.save_note()
+
+    def manage_attachments(self):
+        """查看和管理便签本地附件，打开前验证数据目录内的相对路径。"""
+        from features.attachments import remove_attachment, attachment_path
+        dialog = QDialog(self)
+        dialog.setWindowTitle('本地附件')
+        dialog.resize(460, 360)
+        layout = QVBoxLayout(dialog)
+        listing = QListWidget()
+        layout.addWidget(listing)
+        preview = QLabel('选择附件查看信息')
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+
+        def refresh():
+            listing.clear()
+            for entry in self.note_data.get('attachments', []):
+                listing.addItem(entry.get('name', '未命名附件'))
+            self._update_attachment_button()
+
+        def selected():
+            index = listing.currentRow()
+            entries = self.note_data.get('attachments', [])
+            return (index, entries[index]) if 0 <= index < len(entries) else (None, None)
+
+        def show_preview():
+            _, entry = selected()
+            preview.clear()
+            if not entry:
+                preview.setText('选择附件查看信息')
+                return
+            try:
+                path = attachment_path(self.notes_dir, entry['path'])
+                if os.path.isfile(path):
+                    pixmap = QPixmap(path)
+                    if not pixmap.isNull():
+                        preview.setPixmap(pixmap.scaled(240, 120, Qt.KeepAspectRatio,
+                                                        Qt.SmoothTransformation))
+                    else:
+                        preview.setText(f"{entry['name']} · {os.path.getsize(path)} 字节")
+                else:
+                    preview.setText(f"{entry['name']} · 文件缺失")
+            except (KeyError, ValueError, OSError):
+                preview.setText('附件路径无效')
+
+        listing.currentRowChanged.connect(show_preview)
+        row = QHBoxLayout()
+        add_btn = QPushButton('添加文件')
+        open_btn = QPushButton('打开')
+        remove_btn = QPushButton('移除')
+        close_btn = QPushButton('关闭')
+        for button in (add_btn, open_btn, remove_btn, close_btn):
+            row.addWidget(button)
+        layout.addLayout(row)
+
+        def add():
+            paths, _ = QFileDialog.getOpenFileNames(dialog, '选择本地附件')
+            self.add_attachment_files(paths)
+            if paths:
+                refresh()
+
+        def open_selected():
+            _, entry = selected()
+            if entry:
+                try:
+                    path = attachment_path(self.notes_dir, entry['path'])
+                    if not os.path.isfile(path):
+                        raise FileNotFoundError(path)
+                    os.startfile(path)
+                except (KeyError, ValueError, OSError) as exc:
+                    QMessageBox.warning(dialog, '无法打开附件', str(exc))
+
+        def remove_selected():
+            index, entry = selected()
+            if entry:
+                try:
+                    remove_attachment(self.notes_dir, entry)
+                    self.note_data['attachments'].pop(index)
+                    self.save_note_sync()
+                    refresh()
+                except (KeyError, ValueError, OSError) as exc:
+                    QMessageBox.warning(dialog, '无法移除附件', str(exc))
+
+        add_btn.clicked.connect(add)
+        open_btn.clicked.connect(open_selected)
+        remove_btn.clicked.connect(remove_selected)
+        close_btn.clicked.connect(dialog.accept)
+        if self.is_locked:
+            add_btn.setEnabled(False)
+            remove_btn.setEnabled(False)
+        refresh()
+        dialog.exec_()
+
+    def add_attachment_files(self, paths):
+        from features.attachments import add_attachment
+        if self.is_locked:
+            return
+        added = False
+        for path in paths:
+            try:
+                entry = add_attachment(self.notes_dir, self.note_id, path)
+                self.note_data.setdefault('attachments', []).append(entry)
+                added = True
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, '附件添加失败', f'{os.path.basename(path)}: {exc}')
+        if added:
+            self.save_note_sync()
+            self._update_attachment_button()
+
+    def _update_attachment_button(self):
+        count = len(self.note_data.get('attachments', []))
+        self.attachment_btn.setToolTip(f'管理本地附件（{count} 个）')
+
+    def add_pasted_image(self, image):
+        """显式粘贴的图片转成便签本地附件。"""
+        if isinstance(image, QPixmap):
+            image = image.toImage()
+        if self.is_locked or not isinstance(image, QImage) or image.isNull():
+            return
+        descriptor, path = tempfile.mkstemp(prefix='pasted_', suffix='.png', dir=self.notes_dir)
+        os.close(descriptor)
+        try:
+            if image.save(path, 'PNG'):
+                self.add_attachment_files([path])
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def create_note_from_selection(self):
+        if not self.manager:
+            return
+        selected = self.text_edit.textCursor().selectedText().replace('\u2029', '\n').strip()
+        if selected:
+            self.manager.create_note_from_text(selected)
+        else:
+            QMessageBox.information(self, '选中文字新建便签', '请先在正文中选择文字')
+
+    def _show_editor_context_menu(self, point):
+        menu = self.text_edit.createStandardContextMenu()
+        menu.addSeparator()
+        action = menu.addAction('选中文字新建便签')
+        action.setEnabled(self.text_edit.textCursor().hasSelection())
+        action.triggered.connect(self.create_note_from_selection)
+        menu.exec_(self.text_edit.mapToGlobal(point))
 
     def _toggle_markdown_mode(self):
         """切换 Markdown 预览模式"""
@@ -4466,6 +4676,12 @@ class StickyNote(QWidget):
         reminder_action = QAction('⏰ 设置提醒', self)
         reminder_action.triggered.connect(self.open_reminder_dialog)
         menu.addAction(reminder_action)
+        attachment_action = QAction('📎 本地附件', self)
+        attachment_action.triggered.connect(self.manage_attachments)
+        menu.addAction(attachment_action)
+        selection_action = QAction('选中文字新建便签', self)
+        selection_action.triggered.connect(self.create_note_from_selection)
+        menu.addAction(selection_action)
 
         menu.addSeparator()
 
@@ -4473,6 +4689,10 @@ class StickyNote(QWidget):
         hide_action = QAction('隐藏便签', self)
         hide_action.triggered.connect(self.hide_note)
         menu.addAction(hide_action)
+
+        archive_action = QAction('归档便签', self)
+        archive_action.triggered.connect(self.archive_note)
+        menu.addAction(archive_action)
 
         delete_action = QAction('删除便签', self)
         delete_action.triggered.connect(self.delete_note)

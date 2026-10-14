@@ -10,12 +10,13 @@
 """
 
 from datetime import datetime, timedelta
+import calendar
 from enum import Enum
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QComboBox, QCheckBox, QPushButton, QLabel,
-    QDateTimeEdit, QMessageBox
+    QDateTimeEdit, QMessageBox, QListWidget, QListWidgetItem, QInputDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QDateTime
 
@@ -38,6 +39,8 @@ class ReminderData:
         self.repeat: str = d.get('repeat', RepeatMode.ONCE.value)
         self.message: str = d.get('message', '')
         self.last_triggered: str = d.get('last_triggered', '')  # ISO 格式（防重复触发）
+        self.completed: bool = bool(d.get('completed', False))
+        self.snoozed_until: str = d.get('snoozed_until', '')
 
     def to_dict(self) -> dict:
         return {
@@ -46,52 +49,53 @@ class ReminderData:
             'repeat': self.repeat,
             'message': self.message,
             'last_triggered': self.last_triggered,
+            'completed': self.completed,
+            'snoozed_until': self.snoozed_until,
         }
 
-    def is_due(self) -> bool:
+    def is_due(self, now=None) -> bool:
         """判断提醒是否已到期"""
-        if not self.enabled or not self.datetime_str:
+        if not self.enabled or self.completed or not self.datetime_str:
             return False
         try:
             target = datetime.fromisoformat(self.datetime_str)
-            now = datetime.now()
-
+            now = now or datetime.now()
+            if self.snoozed_until:
+                return now >= datetime.fromisoformat(self.snoozed_until)
             if self.repeat == RepeatMode.ONCE.value:
-                # 一次性：当前时间 > 目标时间 且 今天还没触发过
-                if now < target:
-                    return False
-                return self.last_triggered != now.strftime('%Y-%m-%d')
-            elif self.repeat == RepeatMode.DAILY.value:
-                # 每天：今天的目标时间未触发
-                today_target = now.replace(hour=target.hour, minute=target.minute, second=0)
-                if now < today_target:
-                    return False
-                return self.last_triggered != now.strftime('%Y-%m-%d')
-            elif self.repeat == RepeatMode.WEEKLY.value:
-                # 每周：本周该星期几的目标时间
-                today_target = now.replace(hour=target.hour, minute=target.minute, second=0)
-                day_diff = target.weekday() - now.weekday()
-                if day_diff > 0 or (day_diff == 0 and now < today_target):
-                    return False
-                if day_diff == 0:
-                    return self.last_triggered != now.strftime('%Y-%m-%d')
-                # 目标星期已过，但还没触发
-                return self.last_triggered != now.strftime('%Y-%m-%d')
-            elif self.repeat == RepeatMode.MONTHLY.value:
-                today_target = now.replace(
-                    day=min(target.day, 28),
-                    hour=target.hour, minute=target.minute, second=0
-                )
-                if now < today_target:
-                    return False
-                return self.last_triggered != now.strftime('%Y-%m-%d')
-        except (ValueError, OSError):
+                return now >= target and not self.last_triggered
+            occurrence = self._occurrence(target, now)
+            return now >= occurrence >= target and self.last_triggered != occurrence.date().isoformat()
+        except (ValueError, OSError, TypeError):
             return False
-        return False
+
+    def _occurrence(self, target, now):
+        if self.repeat == RepeatMode.DAILY.value:
+            occurrence = now.replace(hour=target.hour, minute=target.minute,
+                                     second=0, microsecond=0)
+            return occurrence - timedelta(days=1) if occurrence > now else occurrence
+        if self.repeat == RepeatMode.WEEKLY.value:
+            day = now.date() - timedelta(days=(now.weekday() - target.weekday()) % 7)
+            occurrence = datetime.combine(day, target.time()).replace(second=0, microsecond=0)
+            return occurrence - timedelta(days=7) if occurrence > now else occurrence
+        if self.repeat == RepeatMode.MONTHLY.value:
+            day = min(target.day, calendar.monthrange(now.year, now.month)[1])
+            occurrence = now.replace(day=day, hour=target.hour, minute=target.minute,
+                                     second=0, microsecond=0)
+            if occurrence > now:
+                year, month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+                day = min(target.day, calendar.monthrange(year, month)[1])
+                occurrence = occurrence.replace(year=year, month=month, day=day)
+            return occurrence
+        return target
 
     def mark_triggered(self):
         """标记已触发"""
-        self.last_triggered = datetime.now().strftime('%Y-%m-%d')
+        now = datetime.now()
+        target = datetime.fromisoformat(self.datetime_str)
+        occurrence = target if self.repeat == RepeatMode.ONCE.value else self._occurrence(target, now)
+        self.last_triggered = occurrence.date().isoformat()
+        self.snoozed_until = ''
 
 
 class ReminderDialog(QDialog):
@@ -188,6 +192,9 @@ class ReminderDialog(QDialog):
                      2: RepeatMode.WEEKLY.value, 3: RepeatMode.MONTHLY.value}
         self.reminder.repeat = mode_map[self.repeat_combo.currentIndex()]
         self.reminder.message = self.note.title_edit.text().strip()
+        self.reminder.completed = False
+        self.reminder.last_triggered = ''
+        self.reminder.snoozed_until = ''
 
         self.note.note_data['reminder'] = self.reminder.to_dict()
         if not self.note.is_deleted:
@@ -220,6 +227,49 @@ class ReminderManager:
             if reminder.is_due():
                 self._trigger_reminder(note, reminder)
 
+    @staticmethod
+    def _persist(note):
+        if getattr(note, 'is_deleted', False):
+            return
+        save_sync = getattr(note, 'save_note_sync', None)
+        if callable(save_sync):
+            save_sync()
+        else:
+            note.save_note()
+
+    def list_entries(self):
+        entries = []
+        for note_id, note in self.manager.notes.items():
+            data = note.note_data.get('reminder')
+            if not isinstance(data, dict) or not data.get('datetime'):
+                continue
+            reminder = ReminderData(data)
+            if not reminder.enabled and not reminder.completed:
+                continue
+            state = ('已完成' if reminder.completed else
+                     '已到期' if reminder.is_due() or (reminder.repeat == 'once' and reminder.last_triggered and not reminder.snoozed_until) else
+                     '未触发')
+            entries.append((note_id, note.note_data.get('title', f'便签 {note_id}'), state,
+                            reminder.datetime_str))
+        return sorted(entries, key=lambda entry: entry[3])
+
+    def snooze(self, note_id, minutes=10):
+        note = self.manager.notes[note_id]
+        reminder = ReminderData(note.note_data.get('reminder'))
+        reminder.enabled = True
+        reminder.completed = False
+        reminder.snoozed_until = (datetime.now() + timedelta(minutes=minutes)).isoformat(timespec='minutes')
+        note.note_data['reminder'] = reminder.to_dict()
+        self._persist(note)
+
+    def complete(self, note_id):
+        note = self.manager.notes[note_id]
+        reminder = ReminderData(note.note_data.get('reminder'))
+        reminder.completed = True
+        reminder.enabled = False
+        note.note_data['reminder'] = reminder.to_dict()
+        self._persist(note)
+
     def _trigger_reminder(self, note, reminder: ReminderData):
         """触发提醒通知"""
         title = note.note_data.get('title', f'\u4fbf\u7b7e {note.note_id}')
@@ -228,17 +278,13 @@ class ReminderManager:
         msg = reminder.message or (
             content[:100] + '...' if len(content) > 100 else content
         )
-        self.manager.tray_icon.showMessage(
-            f'\u23f0 {title}',
-            msg,
-            self.manager.tray_icon.Information,
-            5000
-        )
         # 标记已触发，防止重复通知
         reminder.mark_triggered()
         note.note_data['reminder'] = reminder.to_dict()
-        if not note.is_deleted:
-            note.save_note()
+        self._persist(note)
+        self.manager.tray_icon.showMessage(
+            f'\u23f0 {title}', msg, self.manager.tray_icon.Information, 5000
+        )
 
     def get_reminder_info(self, note) -> dict:
         """获取便签的提醒状态信息（供 UI 显示）"""
@@ -263,3 +309,68 @@ class ReminderManager:
             'enabled': True,
             'text': f'\u23f0 {time_str}{repeat_label}'
         }
+
+
+class ReminderCenterDialog(QDialog):
+    """本地提醒总览。"""
+
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle('提醒中心')
+        self.resize(560, 420)
+        layout = QVBoxLayout(self)
+        self.filter = QComboBox()
+        self.filter.addItems(['全部', '未触发', '已到期', '已完成'])
+        self.filter.currentIndexChanged.connect(self.refresh)
+        layout.addWidget(self.filter)
+        self.listing = QListWidget()
+        self.listing.setAccessibleName('提醒列表')
+        layout.addWidget(self.listing)
+        row = QHBoxLayout()
+        open_button = QPushButton('打开便签')
+        snooze_button = QPushButton('稍后提醒')
+        done_button = QPushButton('标记完成')
+        refresh_button = QPushButton('刷新')
+        for button in (open_button, snooze_button, done_button, refresh_button):
+            row.addWidget(button)
+        layout.addLayout(row)
+        open_button.clicked.connect(self.open_selected)
+        snooze_button.clicked.connect(self.snooze_selected)
+        done_button.clicked.connect(self.complete_selected)
+        refresh_button.clicked.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        self.listing.clear()
+        state_filter = self.filter.currentText()
+        for note_id, title, state, when in self.manager.reminder_manager.list_entries():
+            if state_filter != '全部' and state_filter != state:
+                continue
+            item = QListWidgetItem(f'{state} · {when} · {title}')
+            item.setData(Qt.UserRole, note_id)
+            self.listing.addItem(item)
+
+    def _selected_id(self):
+        item = self.listing.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def open_selected(self):
+        note_id = self._selected_id()
+        if note_id is not None:
+            self.manager.open_note(note_id)
+
+    def snooze_selected(self):
+        note_id = self._selected_id()
+        if note_id is None:
+            return
+        minutes, ok = QInputDialog.getInt(self, '稍后提醒', '分钟:', 10, 1, 1440)
+        if ok:
+            self.manager.reminder_manager.snooze(note_id, minutes)
+            self.refresh()
+
+    def complete_selected(self):
+        note_id = self._selected_id()
+        if note_id is not None:
+            self.manager.reminder_manager.complete(note_id)
+            self.refresh()

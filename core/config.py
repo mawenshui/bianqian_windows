@@ -29,6 +29,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     'config_version': CONFIG_VERSION,
     'default_theme': 'soft_yellow.css',
     'auto_check_update': True,
+    'trash_retention_days': 30,
+    'smart_views': [],
+    'layout_presets': {},
     'font': {
         'family': '微软雅黑',
         'size': 12,
@@ -67,6 +70,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     'ui': {
         'settings_tool_order': list(DEFAULT_SETTINGS_TOOL_ORDER),
         'hover_preview_enabled': True,
+        'group_view': 2,
+        'group_sort': 0,
     },
 }
 

@@ -195,6 +195,9 @@ def main():
     signal.signal(signal.SIGINT, _sigint_handler)
     # 创建 QApplication（主密码对话框需要，后续由 StickyNoteManager 复用）
     from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     # 主密码验证

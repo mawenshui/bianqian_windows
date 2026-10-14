@@ -144,6 +144,9 @@ class GroupViewDialog(QDialog):
         toolbar.addWidget(view_label)
         self.view_combo = QComboBox()
         self.view_combo.addItems(['看板视图', '网格视图', '列表视图'])
+        view_index = self.manager.config.get('ui.group_view', 2)
+        self.view_combo.setCurrentIndex(view_index if isinstance(view_index, int)
+                                        and 0 <= view_index < 3 else 2)
         self.view_combo.currentIndexChanged.connect(self._switch_view)
         self.view_combo.setFixedWidth(120)
         toolbar.addWidget(self.view_combo)
@@ -153,9 +156,22 @@ class GroupViewDialog(QDialog):
         toolbar.addWidget(sort_label)
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(['最近修改', '创建时间', '标题', '标签数量'])
+        sort_index = self.manager.config.get('ui.group_sort', 0)
+        self.sort_combo.setCurrentIndex(sort_index if isinstance(sort_index, int)
+                                        and 0 <= sort_index < 4 else 0)
         self.sort_combo.currentIndexChanged.connect(self._refresh_views)
         self.sort_combo.setFixedWidth(120)
         toolbar.addWidget(self.sort_combo)
+
+        self.smart_views_combo = QComboBox()
+        self.smart_views_combo.setAccessibleName('智能视图快捷入口')
+        self.smart_views_combo.addItem('智能视图', None)
+        views = self.manager.config.get('smart_views', [])
+        for view in (views if isinstance(views, list) else []):
+            if isinstance(view, dict) and isinstance(view.get('name'), str):
+                self.smart_views_combo.addItem(view['name'], view['name'])
+        self.smart_views_combo.currentIndexChanged.connect(self._open_smart_view)
+        toolbar.addWidget(self.smart_views_combo)
 
         refresh_btn = QPushButton('刷新')
         refresh_btn.clicked.connect(self._refresh_views)
@@ -191,9 +207,13 @@ class GroupViewDialog(QDialog):
 
         # 列表视图
         self.list_widget = QListWidget()
+        self.list_widget.setAccessibleName('便签紧凑列表，可多选并批量操作')
+        self.list_widget.setStyleSheet('QListWidget::item:selected { background: #174ea6; color: white; } '
+                                       'QListWidget:focus { border: 2px solid #174ea6; }')
         self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)  # 多选
         self.list_widget.itemDoubleClicked.connect(self._on_list_item_clicked)
         self.stack.addWidget(self.list_widget)
+        self.stack.setCurrentIndex(self.view_combo.currentIndex())
 
         main_layout.addWidget(self.stack)
 
@@ -205,6 +225,17 @@ class GroupViewDialog(QDialog):
         btn_layout.addStretch()
         
         # 批量操作按钮
+        batch_archive_btn = QPushButton('批量归档')
+        batch_archive_btn.setFixedSize(90, 32)
+        batch_archive_btn.clicked.connect(self._batch_archive)
+        btn_layout.addWidget(batch_archive_btn)
+        pin_btn = QPushButton('批量置顶')
+        pin_btn.clicked.connect(self._batch_pin)
+        btn_layout.addWidget(pin_btn)
+        color_btn = QPushButton('批量颜色')
+        color_btn.clicked.connect(self._batch_theme)
+        btn_layout.addWidget(color_btn)
+
         batch_delete_btn = QPushButton('批量删除')
         batch_delete_btn.setFixedSize(90, 32)
         batch_delete_btn.clicked.connect(self._batch_delete)
@@ -230,6 +261,13 @@ class GroupViewDialog(QDialog):
 
     def _switch_view(self, index):
         self.stack.setCurrentIndex(index)
+        self.manager.config.set('ui.group_view', index)
+
+    def _open_smart_view(self, index):
+        name = self.smart_views_combo.itemData(index)
+        if name:
+            self.manager.open_smart_view(name)
+            self.smart_views_combo.setCurrentIndex(0)
 
     def _get_note_infos(self) -> List[dict]:
         """收集所有便签信息"""
@@ -256,12 +294,15 @@ class GroupViewDialog(QDialog):
                 plain = note.note_data.get('plain_content', '') or note.text_edit.toPlainText()
                 tags = note.note_data.get('tags', [])
                 is_open = True
+                data = note.note_data
             else:
                 # 未打开的便签，从文件读取
                 fpath = os.path.join(notes_dir, f'note_{nid}.json')
                 try:
                     with open(fpath, 'r', encoding='utf-8') as f:
                         data = json.load(f)
+                    if data.get('archived'):
+                        continue
                     title = data.get('title', f'便签 {nid}')
                     plain = data.get('plain_content', '')
                     tags = data.get('tags', [])
@@ -281,6 +322,8 @@ class GroupViewDialog(QDialog):
                 'tags': tags,
                 'tag_colors': tag_colors,
                 'is_open': is_open,
+                'modified': data.get('updated_at', ''),
+                'created': data.get('created_at', ''),
             })
 
         return infos
@@ -291,10 +334,11 @@ class GroupViewDialog(QDialog):
 
         # 排序
         sort_idx = self.sort_combo.currentIndex() if hasattr(self, 'sort_combo') else 0
+        self.manager.config.set('ui.group_sort', sort_idx)
         if sort_idx == 0:
-            infos.sort(key=lambda x: x['id'], reverse=True)  # 最近修改（ID 大的更新）
+            infos.sort(key=lambda x: (x['modified'], x['id']), reverse=True)
         elif sort_idx == 1:
-            infos.sort(key=lambda x: x['id'])  # 创建时间
+            infos.sort(key=lambda x: (x['created'], x['id']))
         elif sort_idx == 2:
             infos.sort(key=lambda x: x['title'])  # 标题
         elif sort_idx == 3:
@@ -431,11 +475,40 @@ class GroupViewDialog(QDialog):
             return
         reply = QMessageBox.question(
             self, '确认删除',
-            f'确定要删除选中的 {len(note_ids)} 个便签吗？此操作不可恢复！',
+            f'将选中的 {len(note_ids)} 个便签移至回收站？锁定便签也会移动。',
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes and self.manager:
             self.manager.batch_delete_notes(note_ids)
+            self._refresh_views()
+
+    def _batch_archive(self):
+        note_ids = self._get_selected_note_ids()
+        if not note_ids:
+            QMessageBox.information(self, '提示', '请先在列表视图中选择便签')
+            return
+        if self.manager:
+            self.manager.batch_archive_notes(note_ids)
+            self._refresh_views()
+
+    def _batch_pin(self):
+        note_ids = self._get_selected_note_ids()
+        if note_ids:
+            choice, ok = QInputDialog.getItem(self, '批量置顶', '操作:',
+                                              ['置顶', '取消置顶'], 0, False)
+            if ok:
+                self.manager.batch_set_pin(note_ids, choice == '置顶')
+                self._refresh_views()
+
+    def _batch_theme(self):
+        note_ids = self._get_selected_note_ids()
+        if not note_ids:
+            return
+        from core import get_styles_dir
+        themes = sorted(name for name in os.listdir(get_styles_dir()) if name.endswith('.css'))
+        theme, ok = QInputDialog.getItem(self, '批量颜色', '主题:', themes, 0, False)
+        if ok and theme:
+            self.manager.batch_set_theme(note_ids, theme)
             self._refresh_views()
 
     def _batch_tag(self):

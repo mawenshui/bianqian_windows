@@ -182,7 +182,8 @@ class TestUpdateFlowWithMock(unittest.TestCase):
             mgr._on_update_available(self.update_info)
 
             # 手动检查时仍应创建对话框
-            mock_dialog_cls.assert_called_once_with(self.update_info, '1.7.10')
+            from core import __version__
+            mock_dialog_cls.assert_called_once_with(self.update_info, __version__)
 
     def test_no_update_manual_shows_message(self):
         """手动检查无更新时显示提示"""

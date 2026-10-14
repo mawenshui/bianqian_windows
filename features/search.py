@@ -8,15 +8,53 @@
 import os
 import json
 import logging
+import html
+import re
+import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, 
-    QListWidgetItem, QPushButton, QLabel, QMessageBox, QComboBox
+    QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QLabel, QMessageBox, QComboBox, QTextBrowser, QInputDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QTextDocument
+
+
+def _plain_content(data):
+    plain = data.get('plain_content')
+    if isinstance(plain, str):
+        return plain
+    content = data.get('content', '') or ''
+    if not isinstance(content, str):
+        return ''
+    if '<html' in content.lower() or '<p' in content.lower():
+        document = QTextDocument()
+        document.setHtml(content)
+        return document.toPlainText()
+    return content
+
+
+def _highlight(text, query):
+    if not query:
+        return html.escape(text)
+    return ''.join(
+        f'<b style="background-color:#ffe17a;color:#202020">{html.escape(part)}</b>'
+        if part.casefold() == query.casefold() else html.escape(part)
+        for part in re.split(f'({re.escape(query)})', text, flags=re.IGNORECASE)
+    )
+
+
+def _snippet(content, query, limit=130):
+    content = ' '.join(content.split())
+    if len(content) <= limit:
+        return content
+    match = content.casefold().find(query.casefold()) if query else 0
+    start = max(0, match - 35) if match >= 0 else 0
+    end = min(len(content), start + limit)
+    return ('…' if start else '') + content[start:end] + ('…' if end < len(content) else '')
 
 
 class SearchDialog(QDialog):
@@ -53,7 +91,7 @@ class SearchDialog(QDialog):
         初始化用户界面
         """
         self.setWindowTitle('搜索便签')
-        self.setFixedSize(500, 400)
+        self.resize(760, 620)
         
         layout = QVBoxLayout()
         
@@ -85,9 +123,74 @@ class SearchDialog(QDialog):
         filter_layout.addWidget(filter_label)
         filter_layout.addWidget(self.tag_filter, 1)
         layout.addLayout(filter_layout)
+
+        # 组合筛选均针对本地元数据，空关键词也可使用。
+        filter_row = QHBoxLayout()
+        second_filter_row = QHBoxLayout()
+        self.date_filter = QComboBox()
+        for label, days in [('全部时间', 0), ('最近 7 天', 7), ('最近 30 天', 30)]:
+            self.date_filter.addItem(label, days)
+        self.date_kind = QComboBox()
+        self.date_kind.addItem('按修改时间', 'modified')
+        self.date_kind.addItem('按创建时间', 'created')
+        self.reminder_filter = QComboBox()
+        for label, value in [('提醒不限', None), ('有提醒', True), ('无提醒', False)]:
+            self.reminder_filter.addItem(label, value)
+        self.image_filter = QComboBox()
+        for label, value in [('图片/附件不限', None), ('含图片/附件', True), ('无图片/附件', False)]:
+            self.image_filter.addItem(label, value)
+        self.pin_filter = QComboBox()
+        for label, value in [('置顶不限', None), ('已置顶', True), ('未置顶', False)]:
+            self.pin_filter.addItem(label, value)
+        self.state_filter = QComboBox()
+        for label, value in [('活动与归档', 'all'), ('仅活动', 'active'), ('仅归档', 'archived')]:
+            self.state_filter.addItem(label, value)
+        self.todo_filter = QComboBox()
+        self.todo_filter.addItem('清单不限', None)
+        self.todo_filter.addItem('仅有未完成项', True)
+        self.theme_filter = QComboBox()
+        self.theme_filter.addItem('颜色不限', None)
+        try:
+            from core import get_styles_dir
+            for filename in sorted(os.listdir(get_styles_dir())):
+                if filename.endswith('.css'):
+                    self.theme_filter.addItem(filename[:-4], filename)
+        except OSError:
+            pass
+        self.content_filter = QComboBox()
+        for label, kind in [('类型不限', None), ('清单', 'checklist'),
+                            ('图片', 'image'), ('附件', 'attachment'), ('纯文字', 'text')]:
+            self.content_filter.addItem(label, kind)
+        self.content_filter.currentIndexChanged.connect(self.perform_search)
+        for combo in (self.date_kind, self.date_filter, self.reminder_filter, self.image_filter,
+                      self.pin_filter, self.state_filter, self.todo_filter, self.theme_filter):
+            combo.currentIndexChanged.connect(self.perform_search)
+            (filter_row if combo in (
+                self.date_kind, self.date_filter, self.state_filter
+            ) else second_filter_row).addWidget(combo)
+        layout.addLayout(filter_row)
+        layout.addLayout(second_filter_row)
+        third_filter_row = QHBoxLayout()
+        third_filter_row.addWidget(self.content_filter)
+        layout.addLayout(third_filter_row)
+        view_row = QHBoxLayout()
+        self.saved_view_combo = QComboBox()
+        self.saved_view_combo.addItem('选择智能视图', None)
+        self.saved_view_combo.currentIndexChanged.connect(self._load_selected_view)
+        view_row.addWidget(self.saved_view_combo, 1)
+        save_view = QPushButton('保存条件')
+        save_view.clicked.connect(self.save_view)
+        view_row.addWidget(save_view)
+        delete_view = QPushButton('删除视图')
+        delete_view.clicked.connect(self.delete_view)
+        view_row.addWidget(delete_view)
+        layout.addLayout(view_row)
+        clear_button = QPushButton('清除条件')
+        clear_button.clicked.connect(self.clear_filters)
+        layout.addWidget(clear_button, alignment=Qt.AlignRight)
         
         # 结果统计标签
-        self.result_label = QLabel('请输入关键词开始搜索')
+        self.result_label = QLabel('输入关键词或选择条件开始搜索')
         self.result_label.setStyleSheet('color: #666; font-size: 12px;')
         layout.addWidget(self.result_label)
         
@@ -119,6 +222,85 @@ class SearchDialog(QDialog):
         
         # 设置焦点到搜索框
         self.search_input.setFocus()
+        self.refresh_saved_views()
+
+    def current_conditions(self):
+        return {
+            'query': self.search_input.text().strip(),
+            'tag': self.tag_filter.currentText(),
+            'date_kind': self.date_kind.currentData(),
+            'days': self.date_filter.currentData(),
+            'reminder': self.reminder_filter.currentData(),
+            'image': self.image_filter.currentData(),
+            'pin': self.pin_filter.currentData(),
+            'state': self.state_filter.currentData(),
+            'todo': self.todo_filter.currentData(),
+            'theme': self.theme_filter.currentData(),
+            'content_type': self.content_filter.currentData(),
+        }
+
+    def apply_conditions(self, conditions):
+        controls = (
+            (self.tag_filter, conditions.get('tag', '全部标签'), True),
+            (self.date_kind, conditions.get('date_kind', 'modified'), False),
+            (self.date_filter, conditions.get('days', 0), False),
+            (self.reminder_filter, conditions.get('reminder'), False),
+            (self.image_filter, conditions.get('image'), False),
+            (self.pin_filter, conditions.get('pin'), False),
+            (self.state_filter, conditions.get('state', 'all'), False),
+            (self.todo_filter, conditions.get('todo'), False),
+            (self.theme_filter, conditions.get('theme'), False),
+            (self.content_filter, conditions.get('content_type'), False),
+        )
+        self.refresh_tag_filter()
+        for combo, value, by_text in controls:
+            index = combo.findText(value) if by_text else combo.findData(value)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        self.search_input.setText(str(conditions.get('query', '')))
+        self.perform_search()
+
+    def refresh_saved_views(self):
+        self.saved_view_combo.blockSignals(True)
+        self.saved_view_combo.clear()
+        self.saved_view_combo.addItem('选择智能视图', None)
+        config = getattr(self.manager, 'config', None)
+        views = config.get('smart_views', []) if config else []
+        for view in (views if isinstance(views, list) else []):
+            if isinstance(view, dict) and isinstance(view.get('name'), str):
+                self.saved_view_combo.addItem(view['name'], view.get('conditions', {}))
+        self.saved_view_combo.blockSignals(False)
+
+    def _load_selected_view(self, index):
+        conditions = self.saved_view_combo.itemData(index)
+        if isinstance(conditions, dict):
+            self.apply_conditions(conditions)
+
+    def save_view(self):
+        current = self.saved_view_combo.currentText() if self.saved_view_combo.currentIndex() else ''
+        name, ok = QInputDialog.getText(self, '智能视图', '视图名称:', text=current)
+        name = name.strip()
+        if not ok or not name:
+            return
+        stored = self.manager.config.get('smart_views', [])
+        views = [view for view in (stored if isinstance(stored, list) else [])
+                 if isinstance(view, dict) and isinstance(view.get('name'), str)
+                 and view['name'].casefold() != name.casefold()]
+        views.append({'name': name, 'conditions': self.current_conditions()})
+        self.manager.config.set('smart_views', views)
+        self.refresh_saved_views()
+        self.saved_view_combo.setCurrentIndex(self.saved_view_combo.findText(name))
+        self.manager.update_tray_menu()
+
+    def delete_view(self):
+        name = self.saved_view_combo.currentText() if self.saved_view_combo.currentIndex() else ''
+        if not name:
+            return
+        stored = self.manager.config.get('smart_views', [])
+        views = [view for view in (stored if isinstance(stored, list) else [])
+                 if isinstance(view, dict) and view.get('name') != name]
+        self.manager.config.set('smart_views', views)
+        self.refresh_saved_views()
+        self.manager.update_tray_menu()
     
     def refresh_tag_filter(self):
         """刷新标签过滤下拉框"""
@@ -126,6 +308,7 @@ class SearchDialog(QDialog):
         current = self.tag_filter.currentText()
         self.tag_filter.clear()
         self.tag_filter.addItem('全部标签')
+        self.tag_filter.addItem('无标签')
         if self.manager and hasattr(self.manager, 'tag_manager'):
             try:
                 all_tags = self.manager.tag_manager.get_all_tags()
@@ -138,6 +321,71 @@ class SearchDialog(QDialog):
         if idx >= 0:
             self.tag_filter.setCurrentIndex(idx)
         self.tag_filter.blockSignals(False)
+
+    def clear_filters(self):
+        self.search_input.clear()
+        for combo in (self.tag_filter, self.date_kind, self.date_filter, self.reminder_filter,
+                      self.image_filter, self.pin_filter, self.state_filter,
+                      self.todo_filter, self.theme_filter, self.content_filter):
+            combo.setCurrentIndex(0)
+        self.perform_search()
+        self.search_input.setFocus()
+
+    def _matches_filters(self, data, modified):
+        tag = self.tag_filter.currentText()
+        tags = data.get('tags') or []
+        if tag == '无标签' and tags:
+            return False
+        if tag not in ('全部标签', '无标签') and not any(
+            isinstance(item, str) and item.casefold() == tag.casefold() for item in tags
+        ):
+            return False
+        days = self.date_filter.currentData()
+        if days:
+            timestamp = modified
+            if self.date_kind.currentData() == 'created':
+                try:
+                    timestamp = datetime.fromisoformat(data.get('created_at', '')).timestamp()
+                except (TypeError, ValueError):
+                    timestamp = modified
+            if timestamp < time.time() - days * 86400:
+                return False
+        reminder = data.get('reminder')
+        has_reminder = isinstance(reminder, dict) and bool(reminder.get('enabled'))
+        wanted = self.reminder_filter.currentData()
+        if wanted is not None and wanted != has_reminder:
+            return False
+        content = data.get('content', '') or ''
+        has_image = '<img' in content.lower() or bool(data.get('background_image'))
+        has_media = has_image or bool(data.get('attachments'))
+        wanted = self.image_filter.currentData()
+        if wanted is not None and wanted != has_media:
+            return False
+        wanted = self.pin_filter.currentData()
+        if wanted is not None and wanted != bool(data.get('pinned')):
+            return False
+        state = self.state_filter.currentData()
+        if state == 'archived' and not data.get('archived'):
+            return False
+        if state == 'active' and data.get('archived'):
+            return False
+        if self.todo_filter.currentData() is True and not any(
+            not item.get('done') for item in data.get('checklist', [])
+        ):
+            return False
+        theme = self.theme_filter.currentData()
+        if theme is not None and theme != data.get('theme'):
+            return False
+        kind = self.content_filter.currentData()
+        if kind == 'checklist' and not data.get('checklist'):
+            return False
+        if kind == 'image' and not has_image:
+            return False
+        if kind == 'attachment' and not data.get('attachments'):
+            return False
+        if kind == 'text' and (has_media or data.get('checklist')):
+            return False
+        return True
     
     def perform_search(self, query=None):
         """
@@ -155,69 +403,57 @@ class SearchDialog(QDialog):
         if query is None:
             query = self.search_input.text()
         
-        if len(query.strip()) < 1:
-            self.result_label.setText('请输入关键词开始搜索')
+        if not isinstance(query, str):
+            query = self.search_input.text()
+        query = query.strip()
+        has_filter = any(combo.currentIndex() for combo in (
+            self.tag_filter, self.date_kind, self.date_filter, self.reminder_filter,
+            self.image_filter, self.pin_filter, self.state_filter, self.todo_filter,
+            self.theme_filter, self.content_filter
+        ))
+        if not query and not has_filter:
+            self.result_label.setText('输入关键词或选择条件开始搜索')
             self.open_button.setEnabled(False)
             return
-        
-        query_lower = query.lower().strip()
-        selected_tag = self.tag_filter.currentText()
-        
-        # 搜索已打开的便签（带相关度评分）
+        folded = query.casefold()
+        seen = set()
+        records = []
         for note_id, note in self.manager.notes.items():
-            title = note.note_data.get('title', '').lower()
-            content = note.note_data.get('content', '').lower()
-            tags = note.note_data.get('tags', [])
-            
-            if query_lower in title or query_lower in content:
-                # 标签过滤
-                if selected_tag != '全部标签' and selected_tag not in tags:
+            note_file = os.path.join(self.manager.notes_dir, f'note_{note_id}.json')
+            modified = os.path.getmtime(note_file) if os.path.isfile(note_file) else time.time()
+            records.append((note_id, note.note_data, True, modified))
+            seen.add(note_id)
+        if os.path.isdir(self.manager.notes_dir):
+            for filename in os.listdir(self.manager.notes_dir):
+                match = re.fullmatch(r'note_(\d+)\.json', filename)
+                if not match:
                     continue
-                score = self._compute_relevance(query_lower, title, content, tags)
-                self.search_results.append((note_id, note, True, score))  # True表示已打开
-        
-        # 搜索未打开的便签文件（使用 LRU 缓存加速）
-        from features.performance import get_note_cache
-        cache = get_note_cache()
-        notes_dir = self.manager.notes_dir
-        if os.path.exists(notes_dir):
-            for filename in os.listdir(notes_dir):
-                if filename.startswith('note_') and filename.endswith('.json'):
-                    try:
-                        note_id_str = filename.split('_')[1].split('.')[0]
-                        note_id = int(note_id_str)
-                        
-                        # 跳过已打开的便签
-                        if note_id in self.manager.notes:
-                            continue
-                        
-                        # 先查缓存
-                        note_data = cache.get(note_id)
-                        if note_data is None:
-                            # 未命中，从磁盘读取并缓存
-                            note_file = os.path.join(notes_dir, filename)
-                            with open(note_file, 'r', encoding='utf-8') as f:
-                                note_data = json.load(f)
-                            cache.put(note_id, note_data)
-                        
-                        title = note_data.get('title', '').lower()
-                        content = note_data.get('content', '').lower()
-                        tags = note_data.get('tags', [])
-                        
-                        if query_lower in title or query_lower in content:
-                            # 标签过滤
-                            if selected_tag != '全部标签' and selected_tag not in tags:
-                                continue
-                            score = self._compute_relevance(query_lower, title, content, tags)
-                            self.search_results.append((note_id, note_data, False, score))  # False表示未打开
-                    
-                    except Exception as e:
-                        logger.warning(f"搜索便签文件 {filename} 时出错: {e}")
+                note_id = int(match.group(1))
+                if note_id in seen:
+                    continue
+                note_file = os.path.join(self.manager.notes_dir, filename)
+                try:
+                    with open(note_file, encoding='utf-8') as stream:
+                        data = json.load(stream)
+                    records.append((note_id, data, False, os.path.getmtime(note_file)))
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning('搜索便签文件 %s 时出错: %s', filename, exc)
+        for note_id, data, opened, modified in records:
+            title = str(data.get('title', ''))
+            content = _plain_content(data)
+            if folded and folded not in title.casefold() and folded not in content.casefold():
+                continue
+            if not self._matches_filters(data, modified):
+                continue
+            score = self._compute_relevance(
+                folded, title.casefold(), content.casefold(), data.get('tags', [])
+            )
+            self.search_results.append((note_id, data, opened, score))
         
         # 按相关度降序排列
         self.search_results.sort(key=lambda x: x[3], reverse=True)
         
-        self.update_results_display()
+        self.update_results_display(query)
     
     def _compute_relevance(self, query, title, content, tags):
         """
@@ -237,53 +473,37 @@ class SearchDialog(QDialog):
             score += 3
         return score
     
-    def update_results_display(self):
+    def update_results_display(self, query=None):
         """
         更新搜索结果显示
         """
         self.results_list.clear()
         
         if not self.search_results:
-            self.result_label.setText('未找到匹配的便签')
+            self.result_label.setText('未找到匹配的便签，请调整关键词或筛选条件')
             self.open_button.setEnabled(False)
             return
         
         self.result_label.setText(f'找到 {len(self.search_results)} 个匹配的便签')
         
-        for note_id, note_data_or_note, is_opened, score in self.search_results:
-            if is_opened:
-                # 已打开的便签
-                note = note_data_or_note
-                title = note.note_data.get('title', f'便签 {note_id}')
-                content = note.note_data.get('content', '')
-                status = '[已打开]'
-            else:
-                # 未打开的便签
-                note_data = note_data_or_note
-                title = note_data.get('title', f'便签 {note_id}')
-                content = note_data.get('content', '')
-                status = '[未打开]'
-            
-            # 截取内容预览
-            content_preview = content.replace('\n', ' ').strip()
-            if len(content_preview) > 100:
-                content_preview = content_preview[:100] + '...'
-            
-            # 创建列表项
-            item_text = f"{status} {title}"
-            if content_preview:
-                item_text += f"\n    {content_preview}"
-            
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.UserRole, note_id)  # 存储便签ID
-            
-            # 设置不同状态的样式
-            if is_opened:
-                item.setToolTip(f'便签ID: {note_id}\n状态: 已打开\n标题: {title}\n内容预览: {content_preview}')
-            else:
-                item.setToolTip(f'便签ID: {note_id}\n状态: 未打开\n标题: {title}\n内容预览: {content_preview}')
-            
+        query = self.search_input.text().strip() if query is None else query
+        for note_id, data, is_opened, _score in self.search_results:
+            title = str(data.get('title') or f'便签 {note_id}')
+            preview = _snippet(_plain_content(data), query)
+            status = '已归档' if data.get('archived') else ('已打开' if is_opened else '未打开')
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, note_id)
+            item.setToolTip(f'{status} · ID {note_id}\n{title}\n{preview}')
             self.results_list.addItem(item)
+            label = QLabel(
+                f'<b>[{status}] {_highlight(title, query)}</b><br>'
+                f'<span>{_highlight(preview, query)}</span>'
+            )
+            label.setWordWrap(True)
+            label.setMargin(5)
+            label.setMinimumHeight(54)
+            item.setSizeHint(label.sizeHint())
+            self.results_list.setItemWidget(item, label)
     
     def on_selection_changed(self):
         """
@@ -303,6 +523,26 @@ class SearchDialog(QDialog):
         note_id = item.data(Qt.UserRole)
         
         try:
+            data = next((entry[1] for entry in self.search_results if entry[0] == note_id), {})
+            if data.get('archived'):
+                preview = QDialog(self)
+                preview.setWindowTitle(f'归档预览 · {data.get("title", "便签")}')
+                preview.resize(520, 380)
+                layout = QVBoxLayout(preview)
+                browser = QTextBrowser()
+                browser.setPlainText(_plain_content(data))
+                layout.addWidget(browser)
+                row = QHBoxLayout()
+                unarchive_button = QPushButton('取消归档并打开')
+                close_button = QPushButton('关闭')
+                row.addWidget(unarchive_button)
+                row.addWidget(close_button)
+                layout.addLayout(row)
+                unarchive_button.clicked.connect(preview.accept)
+                close_button.clicked.connect(preview.reject)
+                if preview.exec_() != QDialog.Accepted:
+                    return
+                self.manager.unarchive_note(note_id)
             # 如果便签已经打开，直接显示
             if note_id in self.manager.notes:
                 note = self.manager.notes[note_id]
@@ -379,8 +619,9 @@ class SearchManager:
                         data = json.load(f)
                     self._note_index[note_id] = {
                         'title': data.get('title', '').lower(),
-                        'content': data.get('content', '').lower(),
+                        'content': _plain_content(data).lower(),
                         'tags': data.get('tags', []),
+                        'archived': bool(data.get('archived')),
                     }
                 except Exception as e:
                     logger.debug(f'索引便签 {filename} 时出错: {e}')
@@ -424,7 +665,7 @@ class SearchManager:
         # 搜索已打开的便签
         for note_id, note in self.manager.notes.items():
             title = note.note_data.get('title', '').lower()
-            content = note.note_data.get('content', '').lower()
+            content = _plain_content(note.note_data).lower()
             
             if query_lower in title or query_lower in content:
                 results.append((note_id, note.note_data, True))

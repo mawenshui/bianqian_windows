@@ -21,7 +21,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from PyQt5.QtWidgets import (
-    QApplication, QMessageBox, QMenu, QAction, QSystemTrayIcon
+    QApplication, QMessageBox, QMenu, QAction, QSystemTrayIcon, QInputDialog
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QTimer
 from PyQt5.QtGui import QIcon
@@ -43,8 +43,9 @@ from features.shortcuts import (
     validate_shortcut_map,
 )
 from features.backup import BackupManager
+from features.note_lifecycle import NoteLifecycle, NoteLifecycleDialog
 from features.positioning import get_position_manager
-from features.reminder import ReminderManager
+from features.reminder import ReminderManager, ReminderCenterDialog
 from features.tag import TagManager
 from features.import_export import ImportExportDialog
 from features.template import TemplateManager
@@ -85,12 +86,16 @@ class StickyNoteManager:
         self.notes = {}
         self.notes_dir = os.path.join(get_user_data_dir(), 'notes')
         os.makedirs(self.notes_dir, exist_ok=True)
+        self.lifecycle = NoteLifecycle(
+            self.notes_dir, os.path.join(get_user_data_dir(), 'trash')
+        )
         logger.info(f'便签数据目录: {self.notes_dir}')
 
         # 加载设置（使用 ConfigManager 统一管理，支持原子写入）
         self.config = get_config()
         self.settings = self.config.get_all()  # 保持向后兼容的快捷访问
         self.settings_file = self.config._settings_file  # 桥接给 feature 模块使用
+        self.lifecycle.cleanup(self.config.get('trash_retention_days', 30))
         self.sync_engine = None
         
         if 'font' not in self.settings:
@@ -302,6 +307,36 @@ class StickyNoteManager:
     def show_search_dialog(self) -> None:
         self.search_manager.show_search_dialog()
 
+    def open_smart_view(self, name):
+        views = self.config.get('smart_views', [])
+        for view in (views if isinstance(views, list) else []):
+            if isinstance(view, dict) and view.get('name') == name:
+                self.show_search_dialog()
+                self.search_manager.search_dialog.apply_conditions(view.get('conditions', {}))
+                return
+
+    def quick_capture(self, from_clipboard=False):
+        initial = self.app.clipboard().text() if from_clipboard else ''
+        body, ok = QInputDialog.getMultiLineText(
+            None, '快速记录', '便签内容（剪贴板仅在选择该入口时读取）:', initial
+        )
+        if ok and body.strip():
+            return self.create_note_from_text(body)
+        return None
+
+    def create_note_from_text(self, body, title=None):
+        note_id = self.generate_note_id()
+        note = StickyNote(note_id, self.notes_dir, manager=self,
+                          theme_css=self.get_default_theme_css())
+        note.text_edit.setPlainText(body)
+        if title:
+            note.title_edit.setText(title)
+        note.save_note_sync()
+        self.notes[note_id] = note
+        note.show()
+        self.update_tray_menu()
+        return note_id
+
     def show_backup_dialog(self) -> None:
         self.backup_manager.show_backup_dialog()
 
@@ -319,6 +354,70 @@ class StickyNoteManager:
         from features.group_view import GroupViewDialog
         dialog = GroupViewDialog(self)
         dialog.exec_()
+
+    def show_lifecycle_dialog(self) -> None:
+        NoteLifecycleDialog.show(self)
+
+    def show_reminder_center(self) -> None:
+        ReminderCenterDialog(self).exec_()
+
+    def save_layout_preset(self):
+        name, ok = QInputDialog.getText(None, '保存桌面布局', '布局名称:')
+        name = name.strip()
+        if not ok or not name:
+            return
+        presets = self.config.get('layout_presets', {})
+        if not isinstance(presets, dict):
+            presets = {}
+        presets[name] = {
+            str(note_id): [note.x(), note.y(), note.width(), note.height()]
+            for note_id, note in self.notes.items()
+        }
+        self.config.set('layout_presets', presets)
+
+    def restore_layout_preset(self):
+        presets = self.config.get('layout_presets', {})
+        if not isinstance(presets, dict):
+            presets = {}
+        if not presets:
+            QMessageBox.information(None, '桌面布局', '尚未保存布局')
+            return
+        name, ok = QInputDialog.getItem(None, '恢复桌面布局', '布局:',
+                                         sorted(presets), 0, False)
+        if not ok:
+            return
+        if not isinstance(presets.get(name), dict):
+            return
+        screens = [screen.availableGeometry() for screen in self.app.screens()]
+        if not screens:
+            return
+        for key, geometry in presets[name].items():
+            try:
+                note = self.notes.get(int(key))
+                if note is None or len(geometry) != 4:
+                    continue
+                x, y, width, height = map(int, geometry)
+                screen = next((area for area in screens if area.contains(x, y)), screens[0])
+                width = min(max(width, 200), screen.width())
+                height = min(max(height, 100), screen.height())
+                x = max(screen.left(), min(x, screen.right() - width + 1))
+                y = max(screen.top(), min(y, screen.bottom() - height + 1))
+                note.setGeometry(x, y, width, height)
+                note.save_note()
+            except (ValueError, TypeError):
+                continue
+
+    def delete_layout_preset(self):
+        presets = self.config.get('layout_presets', {})
+        if not isinstance(presets, dict):
+            presets = {}
+        if not presets:
+            return
+        name, ok = QInputDialog.getItem(None, '删除桌面布局', '布局:',
+                                         sorted(presets), 0, False)
+        if ok:
+            presets.pop(name, None)
+            self.config.set('layout_presets', presets)
 
     def handle_shortcut_activated(self, action_name: str) -> None:
         try:
@@ -345,6 +444,12 @@ class StickyNoteManager:
         add_action = QAction("\u6dfb\u52a0\u4fbf\u7b7e (Ctrl+Shift+N)", self.app)
         add_action.triggered.connect(self.add_note)
         self.tray_menu.addAction(add_action)
+        quick_action = QAction('快速记录...', self.app)
+        quick_action.triggered.connect(self.quick_capture)
+        self.tray_menu.addAction(quick_action)
+        clipboard_action = QAction('从剪贴板快速记录...', self.app)
+        clipboard_action.triggered.connect(lambda: self.quick_capture(True))
+        self.tray_menu.addAction(clipboard_action)
 
         # 从模板创建
         template_action = QAction("\u4ece\u6a21\u677f\u521b\u5efa...", self.app)
@@ -354,6 +459,8 @@ class StickyNoteManager:
         search_action = QAction("\u641c\u7d22\u4fbf\u7b7e (Ctrl+Shift+F)", self.app)
         search_action.triggered.connect(self.show_search_dialog)
         self.tray_menu.addAction(search_action)
+        self.smart_views_menu = QMenu('智能视图', self.tray_menu)
+        self.tray_menu.addMenu(self.smart_views_menu)
 
         backup_action = QAction("备份管理 (Ctrl+Shift+B)", self.app)
         backup_action.triggered.connect(self.show_backup_dialog)
@@ -368,6 +475,16 @@ class StickyNoteManager:
         group_view_action = QAction("分组视图", self.app)
         group_view_action.triggered.connect(self.show_group_view)
         self.tray_menu.addAction(group_view_action)
+        lifecycle_action = QAction('归档与回收站', self.app)
+        lifecycle_action.triggered.connect(self.show_lifecycle_dialog)
+        self.tray_menu.addAction(lifecycle_action)
+        reminder_center = QAction('提醒中心', self.app)
+        reminder_center.triggered.connect(self.show_reminder_center)
+        self.tray_menu.addAction(reminder_center)
+        layout_menu = self.tray_menu.addMenu('桌面布局')
+        layout_menu.addAction('保存当前布局...', self.save_layout_preset)
+        layout_menu.addAction('恢复布局...', self.restore_layout_preset)
+        layout_menu.addAction('删除布局...', self.delete_layout_preset)
 
         self.tray_menu.addSeparator()
 
@@ -428,6 +545,13 @@ class StickyNoteManager:
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
     def update_tray_menu(self) -> None:
+        if hasattr(self, 'smart_views_menu'):
+            self.smart_views_menu.clear()
+            views = self.config.get('smart_views', [])
+            for view in (views if isinstance(views, list) else []):
+                if isinstance(view, dict) and isinstance(view.get('name'), str):
+                    action = self.smart_views_menu.addAction(view['name'])
+                    action.triggered.connect(partial(self.open_smart_view, view['name']))
         self.notes_menu.clear()
         if not self.notes:
             no_notes_action = QAction("暂无便签", self.app)
@@ -454,6 +578,9 @@ class StickyNoteManager:
                 open_action = QAction("打开", self.app)
                 open_action.triggered.connect(partial(self.open_note, note_id))
                 note_menu.addAction(open_action)
+                archive_action = QAction('归档', self.app)
+                archive_action.triggered.connect(partial(self.archive_note, note_id))
+                note_menu.addAction(archive_action)
                 delete_action = QAction("删除", self.app)
                 delete_action.triggered.connect(partial(self.delete_note, note_id))
                 note_menu.addAction(delete_action)
@@ -526,11 +653,63 @@ class StickyNoteManager:
                     self.plugin_loader.dispatch_event('on_note_opened', note_id, None)
                 except Exception as e:
                     logger.debug(f'插件钩子 on_note_opened 失败: {e}')
+            return
+        path = self.lifecycle.note_path(note_id)
+        if os.path.isfile(path):
+            data = self.lifecycle._read(path)
+            if data.get('archived'):
+                return
+            note = StickyNote(note_id, self.notes_dir, manager=self, preloaded_data=data)
+            self.notes[note_id] = note
+            note.show()
+            note.raise_()
+            self.update_tray_menu()
 
     def delete_note(self, note_id: int) -> None:
         if note_id in self.notes:
             note = self.notes[note_id]
             note.delete_note()
+
+    def _close_note_for_lifecycle(self, note_id):
+        note = self.notes.pop(note_id, None)
+        if note is not None:
+            note._save_timer.stop()
+            note.is_deleted = True
+            note.close()
+
+    def _save_open_note_for_lifecycle(self, note_id):
+        note = self.notes.get(note_id)
+        if note is not None:
+            worker = getattr(note, '_save_worker', None)
+            if worker is not None and worker.isRunning():
+                worker.wait()
+            note.save_note_sync()
+
+    def archive_note(self, note_id):
+        self._save_open_note_for_lifecycle(note_id)
+        self.lifecycle.set_archived(note_id, True)
+        self._close_note_for_lifecycle(note_id)
+        self.search_manager.refresh_index()
+        self.update_tray_menu()
+
+    def unarchive_note(self, note_id):
+        self.lifecycle.set_archived(note_id, False)
+        self.open_note(note_id)
+        self.search_manager.refresh_index()
+
+    def trash_note(self, note_id):
+        self._save_open_note_for_lifecycle(note_id)
+        name = self.lifecycle.move_to_trash(note_id)
+        self._close_note_for_lifecycle(note_id)
+        self.search_manager.refresh_index()
+        self.update_tray_menu()
+        return name
+
+    def restore_trashed_note(self, name):
+        note_id = self.lifecycle.restore(name)
+        self.open_note(note_id)
+        self.search_manager.refresh_index()
+        return note_id
 
     def remove_note(self, note_id: int) -> None:
         if note_id in self.notes:
@@ -550,10 +729,21 @@ class StickyNoteManager:
         """批量删除便签，返回成功删除数量"""
         count = 0
         for note_id in list(note_ids):
-            if note_id in self.notes:
-                note = self.notes[note_id]
-                note.delete_note()
+            try:
+                self.trash_note(note_id)
                 count += 1
+            except (OSError, ValueError) as exc:
+                logger.warning('移动便签 %s 到回收站失败: %s', note_id, exc)
+        return count
+
+    def batch_archive_notes(self, note_ids: list) -> int:
+        count = 0
+        for note_id in note_ids:
+            try:
+                self.archive_note(note_id)
+                count += 1
+            except (OSError, ValueError) as exc:
+                logger.warning('归档便签 %s 失败: %s', note_id, exc)
         return count
 
     def batch_tag_notes(self, note_ids: list, tag_name: str, tag_color: str = None) -> int:
@@ -595,17 +785,61 @@ class StickyNoteManager:
     def batch_export_notes(self, note_ids: list, export_path: str) -> int:
         """批量导出便签为独立JSON文件"""
         import shutil
+        from features.attachments import attachment_path
         count = 0
         os.makedirs(export_path, exist_ok=True)
         for note_id in note_ids:
+            self._save_open_note_for_lifecycle(note_id)
             note_file = os.path.join(self.notes_dir, f'note_{note_id}.json')
             if os.path.exists(note_file):
                 try:
                     dest = os.path.join(export_path, f'note_{note_id}.json')
                     shutil.copy2(note_file, dest)
+                    with open(note_file, encoding='utf-8') as stream:
+                        data = json.load(stream)
+                    for entry in data.get('attachments', []):
+                        relative = entry.get('path', '')
+                        source = attachment_path(self.notes_dir, relative)
+                        if os.path.isfile(source):
+                            target = os.path.join(export_path, *relative.split('/'))
+                            os.makedirs(os.path.dirname(target), exist_ok=True)
+                            shutil.copy2(source, target)
                     count += 1
                 except Exception as e:
                     logger.warning(f'导出便签 {note_id} 失败: {e}')
+        return count
+
+    def batch_set_pin(self, note_ids, pinned):
+        return self._batch_update_note_field(note_ids, 'pinned', bool(pinned))
+
+    def batch_set_theme(self, note_ids, theme):
+        if not isinstance(theme, str) or '/' in theme or '\\' in theme or not theme.endswith('.css'):
+            raise ValueError('无效主题文件')
+        if not os.path.isfile(os.path.join(get_styles_dir(), theme)):
+            raise FileNotFoundError(theme)
+        return self._batch_update_note_field(note_ids, 'theme', theme)
+
+    def _batch_update_note_field(self, note_ids, key, value):
+        count = 0
+        for note_id in note_ids:
+            note = self.notes.get(note_id)
+            if note:
+                if key == 'theme':
+                    note.set_theme(value)
+                else:
+                    note.is_pinned = value
+                    note.note_data[key] = value
+                    note.save_note()
+                count += 1
+            else:
+                path = self.lifecycle.note_path(note_id)
+                if os.path.isfile(path):
+                    data = self.lifecycle._read(path)
+                    if not data.get('archived'):
+                        data[key] = value
+                        self.lifecycle._write(path, data)
+                        count += 1
+        self.update_tray_menu()
         return count
 
     def toggle_note_pin(self, note_id: int) -> bool:
@@ -804,6 +1038,8 @@ class StickyNoteManager:
     def _on_note_data_loaded(self, note_id: int, data: dict) -> None:
         """异步加载完成回调 — 在主线程创建便签控件"""
         try:
+            if data.get('archived'):
+                return
             default_theme_css = self.get_default_theme_css()
             new_note = StickyNote(
                 note_id, self.notes_dir,
@@ -833,9 +1069,16 @@ class StickyNoteManager:
             # 如果异步加载后仍无便签，创建默认便签
             if not self.notes:
                 self.add_note()
+            QTimer.singleShot(1000, self.reminder_manager.check_reminders)
 
     def generate_note_id(self) -> int:
         existing_ids = set(self.notes.keys())
+        for filename in os.listdir(self.notes_dir):
+            if filename.startswith('note_') and filename.endswith('.json'):
+                try:
+                    existing_ids.add(int(filename[5:-5]))
+                except ValueError:
+                    continue
         note_id = 1
         while note_id in existing_ids:
             note_id += 1

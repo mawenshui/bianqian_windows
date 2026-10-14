@@ -21,6 +21,36 @@ from PyQt5.QtWidgets import (
     QButtonGroup
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from features.search import _plain_content
+
+
+def preview_txt_import(filepaths, existing_notes):
+    """读取导入文件并标记重复项；读取失败不会阻止其他文件。"""
+    existing = {
+        (str(data.get('title', '')).strip(), _plain_content(data).strip())
+        for data in existing_notes
+    }
+    entries = []
+    errors = []
+    for path in filepaths:
+        try:
+            with open(path, 'r', encoding='utf-8') as stream:
+                text = stream.read()
+            lines = text.splitlines()
+            title = (lines[0].strip()[:50] if lines else '') or os.path.basename(path)
+            if len(lines) > 1 and lines[1] and all(char in '=-' for char in lines[1]):
+                body = '\n'.join(lines[2:]).strip()
+            else:
+                body = '\n'.join(lines[1:]).strip()
+            fingerprint = (title, body)
+            entries.append({
+                'path': path, 'title': title, 'body': body,
+                'duplicate': fingerprint in existing,
+            })
+            existing.add(fingerprint)
+        except (OSError, UnicodeError) as exc:
+            errors.append(f'{os.path.basename(path)}: {exc}')
+    return entries, errors
 
 
 class ExportWorker(QThread):
@@ -221,34 +251,56 @@ class ImportExportDialog(QDialog):
         if not filepaths:
             return
 
-        count = 0
-        for fp in filepaths:
+        existing = [note.note_data for note in self.manager.notes.values()]
+        for name in os.listdir(self.manager.notes_dir):
+            if not (name.startswith('note_') and name.endswith('.json')):
+                continue
             try:
-                with open(fp, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                # 第一行作为标题
-                lines = content.split('\n')
-                title = lines[0].strip()[:50] if lines else os.path.basename(fp)
-                # 移除可能的标题分隔线
-                if len(lines) > 1 and all(c in '=-' for c in lines[1]):
-                    body = '\n'.join(lines[2:])
-                else:
-                    body = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+                with open(os.path.join(self.manager.notes_dir, name), encoding='utf-8') as stream:
+                    existing.append(json.load(stream))
+            except (OSError, ValueError):
+                continue
+        entries, errors = preview_txt_import(filepaths, existing)
+        if not entries:
+            QMessageBox.warning(self, '导入失败', '\n'.join(errors) or '没有可导入的文件')
+            return
+        duplicate_count = sum(entry['duplicate'] for entry in entries)
+        preview = QMessageBox(self)
+        preview.setWindowTitle('导入预览')
+        preview.setText(
+            f'可读取 {len(entries)} 个文件，其中重复 {duplicate_count} 个。\n'
+            f'标题预览：{", ".join(entry["title"] for entry in entries[:5])}\n'
+            f'读取失败 {len(errors)} 个。'
+        )
+        skip_button = preview.addButton('跳过重复并导入', QMessageBox.AcceptRole)
+        all_button = preview.addButton('全部导入', QMessageBox.ActionRole)
+        preview.addButton('取消', QMessageBox.RejectRole)
+        preview.exec_()
+        selected = preview.clickedButton()
+        if selected not in (skip_button, all_button):
+            return
+        count = 0
+        skipped = 0
+        for entry in entries:
+            if entry['duplicate'] and selected == skip_button:
+                skipped += 1
+                continue
+            try:
                 self.manager.add_note()
-                # 获取刚创建的便签（最大 ID）
                 if self.manager.notes:
                     max_id = max(self.manager.notes.keys())
                     new_note = self.manager.notes[max_id]
-                    new_note.title_edit.setText(title)
-                    new_note.text_edit.setPlainText(body.strip())
-                    new_note.note_data['title'] = title
-                    new_note.note_data['content'] = body.strip()
-                    new_note.save_note()
+                    new_note.title_edit.setText(entry['title'])
+                    new_note.text_edit.setPlainText(entry['body'])
+                    new_note.save_note_sync()
                     count += 1
             except Exception as e:
-                QMessageBox.warning(self, '导入失败', f'导入 {os.path.basename(fp)} 失败:\n{e}')
+                errors.append(f'{os.path.basename(entry["path"])}: {e}')
 
-        self.import_status.setText(f'✅ 成功导入 {count} 个便签')
+        self.import_status.setText(f'导入 {count} 个，跳过重复 {skipped} 个，失败 {len(errors)} 个')
         self.manager.update_tray_menu()
-        if count > 0:
-            QMessageBox.information(self, '导入完成', f'已从 {len(filepaths)} 个文件导入 {count} 个便签')
+        QMessageBox.information(
+            self, '导入结果',
+            f'成功 {count} 个，跳过重复 {skipped} 个，失败 {len(errors)} 个。'
+            + ('\n失败详情：\n' + '\n'.join(errors) if errors else '')
+        )
