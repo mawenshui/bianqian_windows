@@ -17,9 +17,10 @@ TRASH_NAME = re.compile(r'^note_(\d+)_([0-9a-f]{32})\.json$')
 
 
 class NoteLifecycle:
-    def __init__(self, notes_dir, trash_dir):
+    def __init__(self, notes_dir, trash_dir, history_store=None):
         self.notes_dir = os.path.realpath(notes_dir)
         self.trash_dir = os.path.realpath(trash_dir)
+        self.history_store = history_store
         os.makedirs(self.notes_dir, exist_ok=True)
         os.makedirs(self.trash_dir, exist_ok=True)
 
@@ -268,6 +269,8 @@ class NoteLifecycle:
             image_path = os.path.join(self.trash_dir, 'images', image_name)
             if os.path.isfile(image_path):
                 os.remove(image_path)
+        if self.history_store is not None:
+            self.history_store.remove_note(data.get('note_uuid'))
 
     def preview_purge(self, names):
         """只读统计永久删除影响，拒绝无效条目和链接。"""
@@ -425,6 +428,8 @@ class NoteLifecycleDialog:
         archive_actions = QHBoxLayout()
         unarchive_button = QPushButton('取消归档并打开')
         archive_actions.addWidget(unarchive_button)
+        history_button = QPushButton('查看版本历史')
+        archive_actions.addWidget(history_button)
         archive_layout.addLayout(archive_actions)
         tabs.addTab(archive_page, '归档')
 
@@ -473,6 +478,11 @@ class NoteLifecycleDialog:
             for item in archive_list.selectedItems():
                 manager.unarchive_note(item.data(Qt.UserRole))
             refresh()
+
+        def show_history():
+            item = archive_list.currentItem()
+            if item is not None:
+                manager.show_note_history(item.data(Qt.UserRole))
 
         def restore():
             for item in trash_list.selectedItems():
@@ -562,6 +572,7 @@ class NoteLifecycleDialog:
             refresh()
 
         unarchive_button.clicked.connect(unarchive)
+        history_button.clicked.connect(show_history)
         restore_button.clicked.connect(restore)
         purge_button.clicked.connect(purge)
         orphan_button.clicked.connect(inspect_orphans)

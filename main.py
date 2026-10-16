@@ -100,6 +100,13 @@ def _check_master_password():
         # 验证密码
         try:
             if enc.verify_password(password, master_hash, master_salt):
+                try:
+                    from core import get_user_data_dir
+                    from features.note_history import get_history_store
+                    get_history_store(os.path.join(get_user_data_dir(), 'notes')).unlock(password)
+                except Exception as exc:
+                    QMessageBox.warning(None, '历史记录不可用',
+                                        f'主密码已验证，但历史记录暂时无法解锁：{exc}')
                 return True
         except Exception:
             pass
@@ -137,15 +144,12 @@ def _perform_reset(mode: int, config) -> bool:
     notes_dir = os.path.join(user_data_dir, 'notes')
 
     try:
-        # 1. 删除所有便签文件
+        # 1. 删除便签及其附件、背景图，避免重置后留下明文资源。
         if os.path.exists(notes_dir):
-            for f in os.listdir(notes_dir):
-                file_path = os.path.join(notes_dir, f)
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                except Exception:
-                    pass
+            shutil.rmtree(notes_dir)
+        trash_dir = os.path.join(user_data_dir, 'trash')
+        if os.path.exists(trash_dir):
+            shutil.rmtree(trash_dir)
 
         # 2. 删除链接索引
         links_index = os.path.join(notes_dir, 'links_index.json')
@@ -162,6 +166,14 @@ def _perform_reset(mode: int, config) -> bool:
                 shutil.rmtree(backups_dir)
             except Exception:
                 pass
+
+        # 历史快照可能保存已删除的旧内容，重置时一并清除。
+        history_dir = os.path.join(get_user_data_dir(), 'history')
+        if os.path.isdir(history_dir):
+            shutil.rmtree(history_dir)
+        presentation_file = os.path.join(user_data_dir, 'presentation_state.json')
+        if os.path.isfile(presentation_file):
+            os.remove(presentation_file)
 
         # 4. 清除主密码设置
         config.set('security.master_password_hash', '')

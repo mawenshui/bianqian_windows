@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget,
     QListWidgetItem, QPushButton, QLabel, QMessageBox, QComboBox, QTextBrowser, QInputDialog
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QEvent, pyqtSignal
 from PyQt5.QtGui import QFont, QTextDocument
 
 
@@ -99,6 +99,39 @@ class LocalNoteRecordCache:
         for note_id in set(self._records) - seen:
             self._records.pop(note_id, None)
         return result
+
+
+def local_note_records(manager, cache=None):
+    """One read path for search, quick switch and task overview."""
+    cache = cache or getattr(getattr(manager, 'search_manager', None), 'record_cache', None) or LocalNoteRecordCache()
+    seen = set()
+    records = []
+    for note_id, note in manager.notes.items():
+        note_file = os.path.join(manager.notes_dir, f'note_{note_id}.json')
+        modified = os.path.getmtime(note_file) if os.path.isfile(note_file) else time.time()
+        records.append((note_id, note.note_data, True, modified))
+        seen.add(note_id)
+    for note_id, data, modified in cache.records(manager.notes_dir):
+        if note_id not in seen:
+            records.append((note_id, data, False, modified))
+    return records
+
+
+def matched_note_records(manager, query, cache=None, limit=None):
+    folded = str(query or '').strip().casefold()
+    results = []
+    for note_id, data, opened, modified in local_note_records(manager, cache):
+        title = str(data.get('title', ''))
+        content = _plain_content(data)
+        if folded and folded not in title.casefold() and folded not in content.casefold():
+            continue
+        score = (10 if folded and title.casefold() == folded else
+                 5 if folded and folded in title.casefold() else 0)
+        if folded and folded in content.casefold():
+            score += 2
+        results.append((note_id, data, opened, modified, score))
+    results.sort(key=lambda item: (item[4], item[3]), reverse=True)
+    return results[:limit] if limit else results
 
 
 class SearchDialog(QDialog):
@@ -479,17 +512,7 @@ class SearchDialog(QDialog):
             self.open_button.setEnabled(False)
             return
         folded = query.casefold()
-        seen = set()
-        records = []
-        for note_id, note in self.manager.notes.items():
-            note_file = os.path.join(self.manager.notes_dir, f'note_{note_id}.json')
-            modified = os.path.getmtime(note_file) if os.path.isfile(note_file) else time.time()
-            records.append((note_id, note.note_data, True, modified))
-            seen.add(note_id)
-        for note_id, data, modified in self._record_cache.records(self.manager.notes_dir):
-            if note_id not in seen:
-                records.append((note_id, data, False, modified))
-        for note_id, data, opened, modified in records:
+        for note_id, data, opened, modified in local_note_records(self.manager, self._record_cache):
             title = str(data.get('title', ''))
             content = _plain_content(data)
             if folded and folded not in title.casefold() and folded not in content.casefold():
@@ -721,3 +744,86 @@ class SearchManager:
                 results.append((note_id, index_entry, False))
         
         return results
+
+
+class QuickSwitchDialog(QDialog):
+    """Keyboard-first locator backed by the existing local record cache."""
+
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle('快速切换便签')
+        self.resize(560, 420)
+        layout = QVBoxLayout(self)
+        self.query = QLineEdit(self)
+        self.query.setPlaceholderText('输入标题或正文，↑↓ 选择，Enter 定位')
+        self.query.setAccessibleName('快速切换搜索')
+        self.query.installEventFilter(self)
+        layout.addWidget(self.query)
+        self.results = QListWidget(self)
+        self.results.setAccessibleName('匹配便签')
+        layout.addWidget(self.results)
+        self.query.textChanged.connect(self.refresh)
+        self.query.returnPressed.connect(self.open_selected)
+        self.results.itemActivated.connect(lambda _item: self.open_selected())
+        self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.query.setFocus()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Down, Qt.Key_Up) and self.query.hasFocus():
+            count = self.results.count()
+            if count:
+                delta = 1 if event.key() == Qt.Key_Down else -1
+                self.results.setCurrentRow((self.results.currentRow() + delta) % count)
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        if watched is self.query and event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Down, Qt.Key_Up):
+            count = self.results.count()
+            if count:
+                delta = 1 if event.key() == Qt.Key_Down else -1
+                self.results.setCurrentRow((self.results.currentRow() + delta) % count)
+            return True
+        return super().eventFilter(watched, event)
+
+    def refresh(self, _query=None):
+        self.results.clear()
+        cache = getattr(self.manager.search_manager, 'record_cache', None)
+        for note_id, data, opened, _modified, _score in matched_note_records(
+                self.manager, self.query.text(), cache, 12):
+            state = ('已归档' if data.get('archived') else
+                     '已贴边' if data.get('edge_collapsed') or
+                     (opened and getattr(self.manager.notes.get(note_id), 'auto_hidden', False)) else
+                     '桌面' if opened and self.manager.notes[note_id].isVisible() else '已隐藏')
+            snippet = _snippet(_plain_content(data), self.query.text(), 70)
+            raw_tags = data.get('tags')
+            tags = ', '.join(str(tag) for tag in raw_tags[:3]) if isinstance(raw_tags, list) else ''
+            item = QListWidgetItem(f'{data.get("title", "便签")}  · {state}\n{snippet}  {tags}')
+            item.setData(Qt.UserRole, note_id)
+            self.results.addItem(item)
+        if self.results.count():
+            self.results.setCurrentRow(0)
+
+    def open_selected(self):
+        item = self.results.currentItem()
+        if item is None:
+            return
+        note_id = item.data(Qt.UserRole)
+        record = next((data for candidate, data, _, _ in local_note_records(self.manager)
+                       if candidate == note_id), None)
+        if record is None:
+            self.refresh()
+            return
+        if record.get('archived'):
+            if QMessageBox.question(self, '已归档便签',
+                    f'{record.get("title", "便签")} 已归档。取消归档并打开？',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            self.manager.unarchive_note(note_id)
+        else:
+            self.manager.open_note(note_id)
+        self.accept()

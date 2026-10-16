@@ -2,12 +2,15 @@
 """便签内的本地复选框清单。"""
 
 import copy
+import json
+import os
 import re
+import uuid
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QApplication, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QDialog, QCheckBox, QLabel, QMessageBox,
 )
 
 
@@ -16,7 +19,8 @@ class ChecklistWidget(QWidget):
         super().__init__(parent)
         self.note = note
         self._items = [
-            {'text': str(item.get('text', '')), 'done': bool(item.get('done'))}
+            {'item_id': item.get('item_id') if re.fullmatch(r'[0-9a-f]{32}', str(item.get('item_id', ''))) else uuid.uuid4().hex,
+             'text': str(item.get('text', '')), 'done': bool(item.get('done'))}
             for item in note.note_data.get('checklist', [])
             if isinstance(item, dict)
         ]
@@ -102,7 +106,7 @@ class ChecklistWidget(QWidget):
             match = re.fullmatch(r'\s*[-*]\s*\[([ xX])\]\s*(.+)', line)
             text = match.group(2).strip() if match else line.strip()
             if text:
-                pasted.append({'text': text[:500], 'done': bool(match and match.group(1).lower() == 'x')})
+                pasted.append({'item_id': uuid.uuid4().hex, 'text': text[:500], 'done': bool(match and match.group(1).lower() == 'x')})
         if pasted:
             self._remember()
             self._items.extend(pasted)
@@ -138,7 +142,7 @@ class ChecklistWidget(QWidget):
         if not text:
             return
         self._remember()
-        self._items.append({'text': text, 'done': False})
+        self._items.append({'item_id': uuid.uuid4().hex, 'text': text, 'done': False})
         self.input.clear()
         self._persist()
         self.refresh()
@@ -165,6 +169,7 @@ class ChecklistWidget(QWidget):
         if not text:
             text = self._items[index]['text']
         updated = {
+            'item_id': self._items[index]['item_id'],
             'text': text, 'done': item.checkState() == Qt.Checked
         }
         if updated == self._items[index]:
@@ -173,3 +178,144 @@ class ChecklistWidget(QWidget):
         self._items[index] = updated
         self._persist()
         QTimer.singleShot(0, self.refresh)
+
+    def set_done_by_id(self, item_id, done):
+        """Use the same undo path as an in-note click."""
+        index = next((i for i, entry in enumerate(self._items)
+                      if entry['item_id'] == item_id), None)
+        if index is None:
+            raise LookupError('清单项目已删除，请刷新')
+        if self._items[index]['done'] == bool(done):
+            return False
+        self._remember()
+        self._items[index]['done'] = bool(done)
+        self._persist()
+        self.refresh()
+        return True
+
+
+def collect_checklist_items(manager, include_archived=False):
+    from features.search import local_note_records
+    rows = []
+    for note_id, data, opened, _modified in local_note_records(manager):
+        if data.get('archived') and not include_archived:
+            continue
+        entries = (manager.notes[note_id].checklist_widget._items
+                   if opened and hasattr(manager.notes[note_id], 'checklist_widget')
+                   else data.get('checklist', []))
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            identity = entry.get('item_id') or f'legacy:{index}'
+            rows.append({'note_id': note_id, 'item_id': identity,
+                         'index': index, 'text': str(entry.get('text', '')),
+                         'done': bool(entry.get('done')),
+                         'title': str(data.get('title', f'便签 {note_id}')),
+                         'archived': bool(data.get('archived'))})
+    return sorted(rows, key=lambda row: (row['done'], row['title'].casefold(), row['index']))
+
+
+def update_checklist_item(manager, note_id, item_id, expected_text, done):
+    """Reject stale item references instead of checking the wrong row."""
+    path = manager.lifecycle.note_path(note_id)
+    if note_id in manager.notes:
+        widget = manager.notes[note_id].checklist_widget
+        entry = next((row for row in widget._items if row['item_id'] == item_id), None)
+        if entry is None or entry['text'] != expected_text:
+            raise LookupError('清单已变化，请刷新后重试')
+        return widget.set_done_by_id(item_id, done)
+    with open(path, encoding='utf-8') as stream:
+        data = json.load(stream)
+    if data.get('archived'):
+        raise ValueError('归档便签的清单只读')
+    items = data.get('checklist', [])
+    if isinstance(item_id, str) and item_id.startswith('legacy:'):
+        try:
+            legacy_index = int(item_id.split(':', 1)[1])
+            entry = items[legacy_index]
+            if not isinstance(entry, dict) or entry.get('item_id'):
+                entry = None
+        except (ValueError, IndexError):
+            entry = None
+    else:
+        entry = next((row for row in items if isinstance(row, dict)
+                      and row.get('item_id') == item_id), None)
+    if entry is None or entry.get('text') != expected_text:
+        raise LookupError('清单已变化，请刷新后重试')
+    if bool(entry.get('done')) == bool(done):
+        return False
+    for row in items:
+        if isinstance(row, dict) and not re.fullmatch(r'[0-9a-f]{32}', str(row.get('item_id', ''))):
+            row['item_id'] = uuid.uuid4().hex
+    entry['done'] = bool(done)
+    if not re.fullmatch(r'[0-9a-f]{32}', str(data.get('note_uuid', ''))):
+        data['note_uuid'] = uuid.uuid4().hex
+    from core.note import _atomic_write_note
+    _atomic_write_note(path, data, getattr(manager, 'history_store', None))
+    manager.search_manager.record_cache.clear()
+    manager.search_manager.refresh_index()
+    return True
+
+
+class ChecklistOverviewDialog(QDialog):
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle('清单总览')
+        self.resize(620, 520)
+        layout = QVBoxLayout(self)
+        self.filter = QLineEdit(self)
+        self.filter.setPlaceholderText('筛选清单或来源便签')
+        layout.addWidget(self.filter)
+        self.include_archived = QCheckBox('显示归档清单（只读）', self)
+        layout.addWidget(self.include_archived)
+        self.list_widget = QListWidget(self)
+        self.list_widget.setAccessibleName('跨便签清单')
+        layout.addWidget(self.list_widget)
+        buttons = QHBoxLayout()
+        refresh_button = QPushButton('刷新')
+        refresh_button.clicked.connect(self.refresh)
+        buttons.addWidget(refresh_button)
+        locate_button = QPushButton('定位便签')
+        locate_button.clicked.connect(self.locate_note)
+        buttons.addWidget(locate_button)
+        layout.addLayout(buttons)
+        self.filter.textChanged.connect(self.refresh)
+        self.include_archived.toggled.connect(self.refresh)
+        self.list_widget.itemChanged.connect(self._toggle)
+        self.refresh()
+
+    def refresh(self, *_args):
+        self.list_widget.blockSignals(True)
+        self.list_widget.clear()
+        query = self.filter.text().casefold().strip()
+        for row in collect_checklist_items(self.manager, self.include_archived.isChecked()):
+            if query and query not in (row['text'] + ' ' + row['title']).casefold():
+                continue
+            item = QListWidgetItem(f'{row["text"]}  · {row["title"]}')
+            item.setData(Qt.UserRole, row)
+            flags = item.flags() | Qt.ItemIsUserCheckable
+            if row['archived'] or not row['item_id']:
+                flags &= ~Qt.ItemIsEnabled
+            item.setFlags(flags)
+            item.setCheckState(Qt.Checked if row['done'] else Qt.Unchecked)
+            self.list_widget.addItem(item)
+        self.list_widget.blockSignals(False)
+
+    def _toggle(self, item):
+        row = item.data(Qt.UserRole)
+        try:
+            update_checklist_item(self.manager, row['note_id'], row['item_id'],
+                                  row['text'], item.checkState() == Qt.Checked)
+        except (LookupError, ValueError, OSError) as exc:
+            QMessageBox.warning(self, '清单已变化', str(exc))
+        self.refresh()
+
+    def locate_note(self):
+        item = self.list_widget.currentItem()
+        if item is not None:
+            row = item.data(Qt.UserRole)
+            if row['archived']:
+                QMessageBox.information(self, '归档便签', '请先在归档与回收站中取消归档。')
+            else:
+                self.manager.open_note(row['note_id'])

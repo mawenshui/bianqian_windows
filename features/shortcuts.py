@@ -46,6 +46,17 @@ SHORTCUT_DEFINITIONS = {
         'default': 'Ctrl+Shift+G',
         'description': '打开便签分组视图',
     },
+    'show_quick_switch': {
+        'label': '快速切换便签',
+        'default': 'Ctrl+Shift+K',
+        'description': '用键盘搜索并定位已有便签',
+    },
+    'toggle_presentation': {
+        'label': '演示遮蔽',
+        'default': '',
+        'description': '开启或结束全局演示遮蔽',
+        'optional': True,
+    },
 }
 
 
@@ -89,6 +100,10 @@ def validate_shortcut_map(shortcuts: Mapping[str, object]):
     for action_name, raw_value in shortcuts.items():
         canonical = canonical_shortcut(raw_value)
         if not canonical:
+            if (str(raw_value or '').strip() == ''
+                    and SHORTCUT_DEFINITIONS.get(action_name, {}).get('optional')):
+                normalized[action_name] = ''
+                continue
             errors.append({
                 'action': action_name,
                 'combination': str(raw_value or ''),
@@ -326,6 +341,8 @@ class GlobalShortcutManager(QObject):
         registered = {}
         errors = []
         for action_name, combination in validation['normalized'].items():
+            if not combination:
+                continue
             if self.register_shortcut(combination, action_name):
                 registered[action_name] = combination
             else:

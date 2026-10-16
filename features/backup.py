@@ -625,6 +625,21 @@ class BackupManager:
                                 files[f'{folder}/attachments/{note_folder}/{name}'] = path
         if os.path.isfile(self.manager.settings_file):
             files['settings.json'] = self.manager.settings_file
+        history_dir = os.path.join(get_user_data_dir(), 'history')
+        if os.path.isdir(history_dir):
+            key_file = os.path.join(history_dir, 'key.json')
+            if os.path.isfile(key_file) and not os.path.islink(key_file):
+                files['history/key.json'] = key_file
+            for note_uuid in os.listdir(history_dir):
+                if not re.fullmatch(r'[0-9a-f]{32}', note_uuid):
+                    continue
+                folder = os.path.join(history_dir, note_uuid)
+                if not os.path.isdir(folder) or os.path.islink(folder):
+                    continue
+                for name in os.listdir(folder):
+                    path = os.path.join(folder, name)
+                    if re.fullmatch(r'\d{8}T\d{6}_\d{6}_[0-9a-f]{12}\.snap', name) and os.path.isfile(path) and not os.path.islink(path):
+                        files[f'history/{note_uuid}/{name}'] = path
         styles_dir = get_styles_dir()
         if os.path.isdir(styles_dir):
             for name in os.listdir(styles_dir):
@@ -681,6 +696,8 @@ class BackupManager:
                         or re.fullmatch(r'notes/attachments/note_\d+/[0-9a-f]{32}_[^/\\]+', name)
                         or re.fullmatch(r'trash/attachments/note_\d+_[0-9a-f]{32}/[0-9a-f]{32}_[^/\\]+', name)
                         or re.fullmatch(r'styles/[^/\\]+\.css', name)
+                        or name == 'history/key.json'
+                        or re.fullmatch(r'history/[0-9a-f]{32}/\d{8}T\d{6}_\d{6}_[0-9a-f]{12}\.snap', name)
                         or name in ('settings.json', 'manifest.json')
                     )
                     if not allowed:
@@ -762,6 +779,14 @@ class BackupManager:
                     if '/attachments/' in name:
                         result['attachment_count'] += 1
                         result['attachment_bytes'] += archive.getinfo(name).file_size
+                    if name == 'history/key.json':
+                        key_data = json.loads(archive.read(name))
+                        if not isinstance(key_data, dict) or key_data.get('format') != 1:
+                            result['errors'].append('历史密钥元数据无效')
+                    if name.startswith('history/') and name.endswith('.snap'):
+                        prefix = archive.read(name)[:1]
+                        if prefix not in (b'P', b'E'):
+                            result['errors'].append(f'历史记录格式无效: {name}')
                 if not result['errors']:
                     archived_notes = {
                         name for name in names if re.fullmatch(r'notes/note_\d+\.json', name)
@@ -830,6 +855,7 @@ class BackupManager:
             targets = [
                 ('notes', self.manager.notes_dir),
                 ('trash', os.path.join(get_user_data_dir(), 'trash')),
+                ('history', os.path.join(get_user_data_dir(), 'history')),
             ]
             try:
                 for folder, target in targets:

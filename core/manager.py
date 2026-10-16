@@ -15,6 +15,8 @@ import sys
 import os
 import json
 import logging
+import hashlib
+import re
 import winreg
 import urllib.request
 from functools import partial
@@ -27,7 +29,7 @@ from PyQt5.QtCore import Qt, QCoreApplication, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QStyle
 
-from core.note import StickyNote, NoteLoadWorker
+from core.note import StickyNote, NoteLoadWorker, _atomic_write_note
 from core.settings import SettingsDialog
 from core import get_project_root, get_styles_dir, get_user_data_dir, __version__
 from core.config import get_config
@@ -48,6 +50,8 @@ from features.positioning import get_position_manager
 from features.reminder import ReminderManager, ReminderCenterDialog
 from features.tag import TagManager
 from features.import_export import ImportExportDialog
+from features.note_history import get_history_store
+from features.presentation_mode import PresentationState
 from features.template import TemplateManager
 from features.linking import NoteLinkManager
 from features.plugin_system.registry import PluginRegistry
@@ -113,10 +117,19 @@ class StickyNoteManager:
         self.app.setWindowIcon(self.icon)
 
         self.notes = {}
+        self.presentation_state = PresentationState(get_user_data_dir())
+        try:
+            state = self.presentation_state.read()
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error('演示遮蔽状态损坏，保持遮蔽: %s', exc)
+            state = {'active': True, 'notes': {}}
+        self.presentation_active = state['active']
+        self._presentation_snapshot = state['notes']
         self.notes_dir = os.path.join(get_user_data_dir(), 'notes')
         os.makedirs(self.notes_dir, exist_ok=True)
+        self.history_store = get_history_store(self.notes_dir)
         self.lifecycle = NoteLifecycle(
-            self.notes_dir, os.path.join(get_user_data_dir(), 'trash')
+            self.notes_dir, os.path.join(get_user_data_dir(), 'trash'), self.history_store
         )
         logger.info(f'便签数据目录: {self.notes_dir}')
 
@@ -160,6 +173,7 @@ class StickyNoteManager:
 
         # 设置托盘
         self.setup_tray_icon()
+        self._set_presentation_menu_state()
 
         # 加载已有便签
         self._pending_loaders = []  # 跟踪异步加载器
@@ -287,6 +301,8 @@ class StickyNoteManager:
                 registered = {}
                 errors = []
                 for action, combination in mapping.items():
+                    if not combination:
+                        continue
                     if self.shortcut_manager.register_global_shortcut(combination, action):
                         registered[action] = combination
                     else:
@@ -334,7 +350,22 @@ class StickyNoteManager:
         return report
 
     def show_search_dialog(self) -> None:
+        if self.presentation_active:
+            return
         self.search_manager.show_search_dialog()
+
+    def show_quick_switch(self) -> None:
+        if self.presentation_active:
+            return
+        from features.search import QuickSwitchDialog
+        dialog = QuickSwitchDialog(self)
+        dialog.exec_()
+
+    def show_checklist_overview(self) -> None:
+        if self.presentation_active:
+            return
+        from features.checklist import ChecklistOverviewDialog
+        ChecklistOverviewDialog(self).exec_()
 
     def open_smart_view(self, name):
         views = self.config.get('smart_views', [])
@@ -345,6 +376,8 @@ class StickyNoteManager:
                 return
 
     def quick_capture(self, from_clipboard=False):
+        if self.presentation_active:
+            return None
         initial = self.app.clipboard().text() if from_clipboard else ''
         body, ok = QInputDialog.getMultiLineText(
             None, '快速记录', '便签内容（剪贴板仅在选择该入口时读取）:', initial
@@ -367,9 +400,13 @@ class StickyNoteManager:
         return note_id
 
     def show_backup_dialog(self) -> None:
+        if self.presentation_active:
+            return
         self.backup_manager.show_backup_dialog()
 
     def show_import_export_dialog(self) -> None:
+        if self.presentation_active:
+            return
         dialog = ImportExportDialog(self)
         dialog.exec_()
 
@@ -410,6 +447,88 @@ class StickyNoteManager:
 
     def show_reminder_center(self) -> None:
         ReminderCenterDialog(self).exec_()
+
+    def show_note_history(self, note_id: int) -> None:
+        from features.note_history import NoteHistoryDialog
+        self._save_open_note_for_lifecycle(note_id)
+        NoteHistoryDialog(self, note_id).exec_()
+
+    def restore_note_history(self, note_id: int, snapshot: str) -> None:
+        """Restore only note content fields, keeping its current window state."""
+        from features.attachments import attachment_path
+        note = self.notes.get(note_id)
+        if note is not None:
+            note.save_note_sync()
+        path = self.lifecycle.note_path(note_id)
+        with open(path, encoding='utf-8') as stream:
+            current = json.load(stream)
+        note_uuid = current.get('note_uuid')
+        prior, resources = self.history_store.restore_data(note_uuid, snapshot)
+        if prior.get('note_uuid') != note_uuid:
+            raise ValueError('历史记录不属于此便签')
+        # A trash restore may assign a new numeric ID. Keep the stable UUID,
+        # but remap the old resource directory to the note's current ID.
+        remapped = {}
+        for relative, payload in resources.items():
+            attachment_match = re.fullmatch(r'attachments/note_\d+/([0-9a-f]{32}_[^/\\]+)', relative)
+            background_match = re.fullmatch(r'images/background_\d+_([^/\\]+)', relative)
+            if attachment_match:
+                target_relative = f'attachments/note_{note_id}/{attachment_match.group(1)}'
+            elif background_match:
+                target_relative = f'images/background_{note_id}_{background_match.group(1)}'
+            else:
+                raise ValueError('历史资源路径无效')
+            remapped[target_relative] = payload
+            for entry in prior.get('attachments', []):
+                if isinstance(entry, dict) and entry.get('path') == relative:
+                    entry['path'] = target_relative
+            if prior.get('background_image') == relative:
+                prior['background_image'] = target_relative
+        resources = remapped
+        # A forced checkpoint makes restoring itself undoable.
+        self.history_store.capture(note_id, current, force=True)
+        created = []
+        try:
+            for relative, payload in resources.items():
+                if relative.startswith('attachments/'):
+                    target = attachment_path(self.notes_dir, relative)
+                elif re.fullmatch(r'images/background_\d+_[^/\\]+', relative):
+                    target = os.path.realpath(os.path.join(self.notes_dir, *relative.split('/')))
+                    if os.path.commonpath([target, os.path.realpath(self.notes_dir)]) != os.path.realpath(self.notes_dir):
+                        raise ValueError('历史资源路径无效')
+                else:
+                    raise ValueError('历史资源路径无效')
+                if os.path.exists(target):
+                    with open(target, 'rb') as stream:
+                        if hashlib.sha256(stream.read()).digest() != hashlib.sha256(payload).digest():
+                            raise ValueError(f'历史资源与当前文件冲突: {relative}')
+                else:
+                    from features.note_history import _atomic_bytes
+                    _atomic_bytes(target, payload)
+                    created.append(target)
+            fields = ('title', 'content', 'plain_content', 'edit_mode',
+                      'markdown_content', 'checklist', 'tags', 'reminder',
+                      'attachments', 'background_image')
+            restored = dict(current)
+            for field in fields:
+                if field in prior:
+                    restored[field] = prior[field]
+                else:
+                    restored.pop(field, None)
+            _atomic_write_note(path, restored, self.history_store)
+        except Exception:
+            for target in created:
+                try:
+                    os.remove(target)
+                except OSError:
+                    logger.warning('历史恢复遗留暂存资源: %s', target)
+            raise
+        if note is not None:
+            self._close_note_for_lifecycle(note_id)
+        if not restored.get('archived'):
+            self.open_note(note_id)
+        self.search_manager.refresh_index()
+        self.update_tray_menu()
 
     def save_layout_preset(self):
         name, ok = QInputDialog.getText(None, '保存桌面布局', '布局名称:')
@@ -469,6 +588,8 @@ class StickyNoteManager:
             self.config.set('layout_presets', presets)
 
     def handle_shortcut_activated(self, action_name: str) -> None:
+        if self.presentation_active and action_name != 'toggle_presentation':
+            return
         try:
             if action_name == 'add_note':
                 self.add_note()
@@ -478,6 +599,10 @@ class StickyNoteManager:
                 self.show_backup_dialog()
             elif action_name == 'show_group_view':
                 self.show_group_view()
+            elif action_name == 'show_quick_switch':
+                self.show_quick_switch()
+            elif action_name == 'toggle_presentation':
+                self.toggle_presentation_mode()
             else:
                 logger.debug(f'未知的快捷键动作: {action_name}')
         except Exception as e:
@@ -510,6 +635,12 @@ class StickyNoteManager:
         search_action = QAction("\u641c\u7d22\u4fbf\u7b7e (Ctrl+Shift+F)", self.app)
         search_action.triggered.connect(self.show_search_dialog)
         self.tray_menu.addAction(search_action)
+        switch_action = QAction('快速切换便签', self.app)
+        switch_action.triggered.connect(self.show_quick_switch)
+        self.tray_menu.addAction(switch_action)
+        checklist_action = QAction('清单总览', self.app)
+        checklist_action.triggered.connect(self.show_checklist_overview)
+        self.tray_menu.addAction(checklist_action)
         self.smart_views_menu = QMenu('智能视图', self.tray_menu)
         self.tray_menu.addMenu(self.smart_views_menu)
 
@@ -541,6 +672,8 @@ class StickyNoteManager:
 
         self.notes_menu = QMenu("便签", self.tray_menu)
         self.tray_menu.addMenu(self.notes_menu)
+        self.edge_notes_menu = QMenu('贴边便签', self.tray_menu)
+        self.tray_menu.addMenu(self.edge_notes_menu)
         
         self.tray_menu.addSeparator()
         
@@ -590,12 +723,36 @@ class StickyNoteManager:
         exit_action = QAction("退出", self.app)
         exit_action.triggered.connect(self.exit_application)
         self.tray_menu.addAction(exit_action)
+        self.presentation_action = QAction('开启演示遮蔽', self.app)
+        self.presentation_action.triggered.connect(self.toggle_presentation_mode)
+        self.tray_menu.insertAction(exit_action, self.presentation_action)
+        self._presentation_exit_action = exit_action
 
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
     def update_tray_menu(self) -> None:
+        if hasattr(self, 'edge_notes_menu'):
+            self.edge_notes_menu.clear()
+            edge_names = {'left': '左', 'right': '右', 'top': '上', 'bottom': '下'}
+            grouped = {}
+            for note_id, note in self.notes.items():
+                if note.auto_hidden and note.hide_tab is not None:
+                    screen = self.app.screenAt(note.hide_tab.geometry().center()) or self.app.primaryScreen()
+                    key = (screen.name() if screen else '屏幕', note.hidden_edge)
+                    grouped.setdefault(key, []).append((note_id, note))
+            for (screen, edge), entries in sorted(grouped.items()):
+                submenu = self.edge_notes_menu.addMenu(f'{screen} · {edge_names.get(edge, edge)}侧')
+                for note_id, note in entries:
+                    action = submenu.addAction(str(note.note_data.get('title', f'便签 {note_id}')))
+                    action.triggered.connect(partial(self.open_note, note_id))
+            if grouped:
+                self.edge_notes_menu.addSeparator()
+                self.edge_notes_menu.addAction('展开全部贴边便签', self.expand_all_edge_notes)
+            else:
+                action = self.edge_notes_menu.addAction('暂无贴边便签')
+                action.setEnabled(False)
         if hasattr(self, 'smart_views_menu'):
             self.smart_views_menu.clear()
             views = self.config.get('smart_views', [])
@@ -672,6 +829,8 @@ class StickyNoteManager:
         self.update_tray_menu()
 
     def on_tray_icon_activated(self, reason) -> None:
+        if self.presentation_active:
+            return
         if reason == QSystemTrayIcon.DoubleClick:
             if self.notes:
                 last_note_id = max(self.notes.keys())
@@ -684,11 +843,18 @@ class StickyNoteManager:
         logger.info(f'创建新便签 #{note_id}')
         default_theme_css = self.get_default_theme_css()
         new_note = StickyNote(note_id, self.notes_dir, manager=self, theme_css=default_theme_css)
-        new_note.show()
+        if self.presentation_active:
+            new_note.save_note_sync()
+            self._presentation_snapshot[str(note_id)] = {'visible': False, 'edge': False}
+            self.presentation_state.write(True, self._presentation_snapshot)
+        else:
+            new_note.show()
         self.notes[note_id] = new_note
         self.update_tray_menu()
 
     def open_note(self, note_id: int) -> None:
+        if self.presentation_active:
+            return
         if note_id in self.notes:
             note = self.notes[note_id]
             # 如果便签处于贴边自动隐藏状态，先恢复
@@ -712,9 +878,87 @@ class StickyNoteManager:
                 return
             note = StickyNote(note_id, self.notes_dir, manager=self, preloaded_data=data)
             self.notes[note_id] = note
+            if data.get('edge_collapsed'):
+                note.note_data['edge_collapsed'] = False
+                note.note_data['hidden_edge'] = None
+                note.save_note_sync()
             note.show()
             note.raise_()
             self.update_tray_menu()
+
+    def expand_all_edge_notes(self) -> None:
+        for note_id, note in list(self.notes.items()):
+            if note.auto_hidden:
+                self.open_note(note_id)
+        self.update_tray_menu()
+
+    def _set_presentation_menu_state(self):
+        if not hasattr(self, 'presentation_action'):
+            return
+        self.presentation_action.setText(
+            '结束演示遮蔽' if self.presentation_active else '开启演示遮蔽')
+        self.tray_icon.setToolTip(
+            '演示遮蔽已开启' if self.presentation_active else '桌面便签应用')
+        for action in self.tray_menu.actions():
+            if action not in (self.presentation_action, self._presentation_exit_action):
+                action.setVisible(not self.presentation_active)
+
+    def toggle_presentation_mode(self):
+        if self.presentation_active:
+            self.end_presentation_mode()
+        else:
+            self.start_presentation_mode()
+
+    def start_presentation_mode(self):
+        """Persist the masking state before hiding any content window."""
+        if self.presentation_active:
+            return
+        snapshot = {}
+        for note_id, note in self.notes.items():
+            note.save_note_sync()
+            snapshot[str(note_id)] = {
+                'visible': bool(note.isVisible()),
+                'edge': bool(note.auto_hidden or note._hover_restored),
+            }
+        self.presentation_state.write(True, snapshot)
+        self._presentation_snapshot = snapshot
+        self.presentation_active = True
+        for widget in self.app.topLevelWidgets():
+            if widget is not self.tray_menu:
+                widget.hide()
+        for note in self.notes.values():
+            if note.hide_tab is not None:
+                note.hide_tab.hide()
+            note.hide()
+        self._set_presentation_menu_state()
+
+    def end_presentation_mode(self):
+        if not self.presentation_active:
+            return
+        try:
+            for note_id, note in self.notes.items():
+                state = self._presentation_snapshot.get(str(note_id), {})
+                if state.get('edge') or note.note_data.get('edge_collapsed'):
+                    if not note.auto_hidden:
+                        note.restore_persisted_edge()
+                    if note.hide_tab is not None:
+                        note.hide_tab.show()
+                    continue
+                if state.get('visible') and not note.note_data.get('archived'):
+                    note.show()
+            self.presentation_state.write(False, {})
+        except Exception as exc:
+            for note in self.notes.values():
+                note.hide()
+                if note.hide_tab is not None:
+                    note.hide_tab.hide()
+            logger.exception('演示遮蔽恢复失败')
+            QMessageBox.warning(None, '恢复失败', f'演示遮蔽仍保持开启：{exc}')
+            return
+        self.presentation_active = False
+        self._presentation_snapshot = {}
+        self._set_presentation_menu_state()
+        self.update_tray_menu()
 
     def delete_note(self, note_id: int) -> None:
         if note_id in self.notes:
@@ -1098,8 +1342,9 @@ class StickyNoteManager:
                 theme_css=default_theme_css,
                 preloaded_data=data
             )
-            new_note.show()
             self.notes[note_id] = new_note
+            if not self.presentation_active and not new_note.restore_persisted_edge():
+                new_note.show()
         except Exception as e:
             logger.error(f'创建便签 {note_id} 时出错: {e}')
         finally:

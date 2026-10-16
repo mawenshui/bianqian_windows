@@ -396,7 +396,8 @@ class TestSettingsDialogUI(unittest.TestCase):
     def test_shortcut_rows_have_separate_non_overlapping_actions(self):
         self.dialog.tab_widget.setCurrentIndex(6)
         self.app.processEvents()
-        self.assertEqual(len(self.dialog._shortcut_editors), 4)
+        from features.shortcuts import get_shortcut_definitions
+        self.assertEqual(set(self.dialog._shortcut_editors), set(get_shortcut_definitions()))
         for action_name, (badge, record_button) in self.dialog._shortcut_editors.items():
             self.assertTrue(badge.property('shortcutBadge'), action_name)
             self.assertGreaterEqual(badge.height(), 32)

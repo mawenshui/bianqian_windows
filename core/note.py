@@ -16,6 +16,7 @@ import copy
 import ctypes
 import shutil
 import tempfile
+import uuid
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -37,6 +38,7 @@ from features.formatter import ContentFormatter
 from features.tag import TagChipWidget
 from features.richtext import RichTextActions
 from features.checklist import ChecklistWidget
+from features.note_history import get_history_store
 from core import get_styles_dir, __version__
 from core.ui_preferences import (
     DEFAULT_SETTINGS_TOOL_ORDER, SETTINGS_TOOL_ORDER_KEY,
@@ -530,19 +532,20 @@ class NoteSaveWorker(QThread):
     save_completed = None  # 保留备用信号
     save_failed = None
 
-    def __init__(self, note_data: dict, file_path: str):
+    def __init__(self, note_data: dict, file_path: str, history_store=None):
         super().__init__()
         self.note_data = note_data
         self.file_path = file_path
+        self.history_store = history_store
 
     def run(self):
         try:
-            _atomic_write_note(self.file_path, self.note_data)
+            _atomic_write_note(self.file_path, self.note_data, self.history_store)
         except Exception as e:
             print(f"[NoteSaveWorker] 保存失败: {self.file_path} - {e}")
 
 
-def _atomic_write_note(path, data):
+def _atomic_write_note(path, data, history_store=None):
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix='.note_', suffix='.tmp', dir=directory)
@@ -552,6 +555,13 @@ def _atomic_write_note(path, data):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        if history_store is not None:
+            try:
+                match = re.fullmatch(r'note_(\d+)\.json', os.path.basename(path))
+                if match:
+                    history_store.capture(int(match.group(1)), data)
+            except Exception:
+                logger.exception('便签已保存，但版本历史写入失败: %s', path)
     finally:
         if os.path.exists(temporary):
             os.remove(temporary)
@@ -682,6 +692,10 @@ class StickyNote(QWidget):
         if not real_note_file.startswith(self.notes_dir + os.sep):
             raise ValueError(f'便签文件路径不合法: {self.note_file}')
         self.note_data = self.load_note(preloaded_data)
+        self.history_store = (getattr(manager, 'history_store', None)
+                              or get_history_store(self.notes_dir))
+        if not re.fullmatch(r'[0-9a-f]{32}', str(self.note_data.get('note_uuid', ''))):
+            self.note_data['note_uuid'] = uuid.uuid4().hex
 
         self.theme = self.note_data.get('theme', theme_css)
         self.background_image = self.note_data.get('background_image', '') or ''
@@ -3076,6 +3090,7 @@ class StickyNote(QWidget):
     def default_note_data(self):
         return {
             'title': f'\u4fbf\u7b7e {self.note_id}',
+            'note_uuid': uuid.uuid4().hex,
             'content': '',
             'plain_content': '',
             'opacity': 0.9,
@@ -3100,6 +3115,8 @@ class StickyNote(QWidget):
             'archived': False,
             'checklist': [],
             'checklist_visible': False,
+            'edge_collapsed': False,
+            'hidden_edge': None,
             'attachments': [],
             'created_at': datetime.now().isoformat(timespec='seconds'),
         }
@@ -3113,7 +3130,13 @@ class StickyNote(QWidget):
         """
         # 同步收集 UI 状态
         # 如果处于贴边自动隐藏状态，使用隐藏前的真实位置
-        if self.auto_hidden and self._pre_hide_geometry:
+        preserving_masked_edge = bool(
+            getattr(self.manager, 'presentation_active', False)
+            and self.note_data.get('edge_collapsed')
+            and not self.auto_hidden and self._pre_hide_geometry is None)
+        if preserving_masked_edge:
+            geo = None  # Keep the stored pre-collapse geometry while masked.
+        elif self._pre_hide_geometry:
             geo = self._pre_hide_geometry
             self.note_data['geometry'] = {
                 'x': geo.x(), 'y': geo.y(),
@@ -3146,6 +3169,17 @@ class StickyNote(QWidget):
         self.note_data['auto_format_enabled'] = self.format_checkbox.isChecked()
         self.note_data['checklist_visible'] = not self.checklist_widget.isHidden()
         self.note_data['updated_at'] = datetime.now().isoformat(timespec='seconds')
+        collapsed = bool(self.auto_hidden or self._hover_restored or preserving_masked_edge)
+        self.note_data['edge_collapsed'] = collapsed
+        self.note_data['hidden_edge'] = (self.hidden_edge or self.note_data.get('hidden_edge')) if collapsed else None
+        if collapsed and self._pre_hide_geometry is not None:
+            geo = self._pre_hide_geometry
+            self.note_data['pre_hide_geometry'] = {
+                'x': geo.x(), 'y': geo.y(), 'width': geo.width(), 'height': geo.height()}
+        elif not collapsed:
+            self.note_data.pop('pre_hide_geometry', None)
+        if not re.fullmatch(r'[0-9a-f]{32}', str(self.note_data.get('note_uuid', ''))):
+            self.note_data['note_uuid'] = uuid.uuid4().hex
 
         # 防抖：重置定时器，500ms 内无新调用才真正写入磁盘
         self._save_timer.start(SAVE_DEBOUNCE_MS)
@@ -3164,7 +3198,7 @@ class StickyNote(QWidget):
             if previous is not None and previous.isRunning():
                 previous.wait()
             data_copy = copy.deepcopy(self.note_data)
-            self._save_worker = NoteSaveWorker(data_copy, self.note_file)
+            self._save_worker = NoteSaveWorker(data_copy, self.note_file, self.history_store)
             self._save_worker.start()
         except Exception as e:
             print(f"[StickyNote] 启动保存线程失败: {e}")
@@ -3184,7 +3218,7 @@ class StickyNote(QWidget):
             worker = getattr(self, '_save_worker', None)
             if worker is not None and worker.isRunning():
                 worker.wait()
-            _atomic_write_note(self.note_file, self.note_data)
+            _atomic_write_note(self.note_file, self.note_data, self.history_store)
         except Exception as e:
             print(f"[StickyNote] 同步保存失败: {e}")
 
@@ -3916,15 +3950,47 @@ class StickyNote(QWidget):
         self.auto_hidden = True
         self.hidden_edge = edge
         self._pre_hide_geometry = self.geometry()
+        self.save_note_sync()
 
         # 创建并显示标签页
         self._create_hide_tab()
         self._set_hide_tab_preview_mode(False)
         self._position_hide_tab()
         self.hide_tab.show()
+        if self.manager is not None:
+            self.manager.update_tray_menu()
 
         # 动画滑出主窗口
         self._slide_out_animation(edge)
+
+    def restore_persisted_edge(self):
+        """Rebuild the existing edge tab before the note body is first shown."""
+        if not self.note_data.get('edge_collapsed'):
+            return False
+        edge = self.note_data.get('hidden_edge')
+        geo = self.note_data.get('pre_hide_geometry') or self.note_data.get('geometry')
+        if edge not in ('left', 'right', 'top', 'bottom') or not isinstance(geo, dict):
+            logger.warning('便签 %s 的贴边状态无效，恢复为可见窗口', self.note_id)
+            self.note_data['edge_collapsed'] = False
+            self.note_data['hidden_edge'] = None
+            return False
+        try:
+            rect = QRect(int(geo['x']), int(geo['y']), int(geo['width']), int(geo['height']))
+            if rect.width() < 100 or rect.height() < 100:
+                raise ValueError('invalid geometry')
+        except (KeyError, TypeError, ValueError):
+            logger.warning('便签 %s 的贴边几何无效，恢复为可见窗口', self.note_id)
+            self.note_data['edge_collapsed'] = False
+            self.note_data['hidden_edge'] = None
+            return False
+        self._pre_hide_geometry = rect
+        self.auto_hidden = True
+        self.hidden_edge = edge
+        self._create_hide_tab()
+        self._set_hide_tab_preview_mode(False)
+        self._position_hide_tab()
+        self.hide_tab.show()
+        return True
 
     def _create_hide_tab(self):
         """
@@ -4224,12 +4290,30 @@ class StickyNote(QWidget):
         if not self.auto_hidden:
             return
 
+        if not self.isVisible():
+            screen = self._get_screen_geometry()
+            if screen is not None:
+                width, height = self.width(), self.height()
+                start = {
+                    'left': (screen.left() - width - 2, self._pre_hide_geometry.y()),
+                    'right': (screen.right() + 2, self._pre_hide_geometry.y()),
+                    'top': (self._pre_hide_geometry.x(), screen.top() - height - 2),
+                    'bottom': (self._pre_hide_geometry.x(), screen.bottom() + 2),
+                }.get(self.hidden_edge)
+                if start:
+                    self.move(*start)
+            self.show()
+
         self._hover_restore_timer.stop()
         self.auto_hidden = False
         if not hover_triggered:
             self.hidden_edge = None
         self._hover_restored = hover_triggered
         self.preview_hint.setVisible(hover_triggered and self.hover_preview_enabled)
+        if not hover_triggered:
+            self.save_note_sync()
+            if self.manager is not None:
+                self.manager.update_tray_menu()
 
         # 取消之前的缩回定时器
         self._cancel_rehide_timer()
@@ -4359,6 +4443,9 @@ class StickyNote(QWidget):
         self._hover_restore_timer.stop()
         self._cancel_rehide_timer()
         self._discard_hide_tab()
+        self.save_note_sync()
+        if self.manager is not None:
+            self.manager.update_tray_menu()
         self.raise_()
         self.activateWindow()
 
@@ -4683,6 +4770,11 @@ class StickyNote(QWidget):
         attachment_action = QAction('📎 本地附件', self)
         attachment_action.triggered.connect(self.manage_attachments)
         menu.addAction(attachment_action)
+        if self.manager is not None:
+            history_action = QAction('版本历史...', self)
+            history_action.triggered.connect(
+                lambda: self.manager.show_note_history(self.note_id))
+            menu.addAction(history_action)
         selection_action = QAction('选中文字新建便签', self)
         selection_action.triggered.connect(self.create_note_from_selection)
         menu.addAction(selection_action)

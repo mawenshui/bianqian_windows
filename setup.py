@@ -158,7 +158,7 @@ executables = [
 
 setup(
     name='StickyNote',
-    version='1.9.0',
+    version='1.10.0',
     description='桌面便签应用 — 一款轻量级的 Windows 桌面便签工具',
     author='MaWenshui',
     options={

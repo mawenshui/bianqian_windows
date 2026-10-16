@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "StickyNote"
-version = "1.9.0"
+version = "1.10.0"
 description = "桌面便签应用 — 一款轻量级的 Windows 桌面便签工具"
 authors = [{name = "MaWenshui"}]
 readme = "readme.md"
@@ -26,11 +26,11 @@ classifiers = [
 dependencies = [
     "PyQt5>=5.15",
     "pywin32>=305",
+    "cryptography>=41.0",
 ]
 
 [project.optional-dependencies]
 crypto = [
-    "cryptography>=41.0",
     "argon2-cffi>=23.1",
 ]
 markdown = [

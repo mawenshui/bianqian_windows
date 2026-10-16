@@ -4,13 +4,13 @@
 
 ## 1. 当前项目基线
 
-截至 2026-10-14，v1.9.0 为当前正式发布版本。发布基线如下：
+截至 2026-10-16，v1.10.0 为当前正式发布版本。发布基线如下：
 
-- Git 分支：`main`，跟踪 `origin/main`；当前正式标签为 `v1.9.0`。
-- 当前代码版本：`1.9.0`。
+- Git 分支：`main`，跟踪 `origin/main`；当前正式标签为 `v1.10.0`。
+- 当前代码版本：`1.10.0`。
 - 版本来源：`core/__init__.py`、`features/__init__.py`、`setup.py`、`pyproject.toml`。
-- 自动化测试：`tests/` 下有 21 个 `test_*.py` 文件；v1.9.0 验证通过 351 项测试和 69 个子测试。
-- 当前正式产物位于 `artifacts/releases/v1.9.0/`，并发布至 GitHub Release；包含便携目录、Portable ZIP、MSI、发布说明和 SHA256 校验文件。
+- 自动化测试：`tests/` 下有 26 个 `test_*.py` 文件；v1.10.0 验证通过 371 项测试和 69 个子测试，`core` 与 `features` 总体覆盖率 57%。
+- 当前正式产物位于 `artifacts/releases/v1.10.0/`，并发布至 GitHub Release；包含便携目录、Portable ZIP、MSI、发布说明和 SHA256 校验文件。
 - 过时文档已移入 `docs/archive/` 并明确标记为历史资料；当前文档不得继续使用归档版本号描述现状。
 - 发布工具已整理到 `tools/release/`；`create_release.py` 从目标版本目录读取资产和 UTF-8 发布说明，不再硬编码版本。
 - 本地 `.venv` 使用 Python 3.12；每次任务仍需验证依赖和构建工具。

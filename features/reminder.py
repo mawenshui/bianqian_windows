@@ -330,6 +330,8 @@ class ReminderManager:
         reminder.mark_triggered()
         note.note_data['reminder'] = reminder.to_dict()
         self._persist(note)
+        if getattr(self.manager, 'presentation_active', False):
+            return
         self.manager.tray_icon.showMessage(
             f'\u23f0 {title}', msg, self.manager.tray_icon.Information, 5000
         )

@@ -136,7 +136,8 @@ class ImportExportDialog(QDialog):
         super().__init__(parent)
         self.manager = manager
         self.setWindowTitle('导入导出')
-        self.setFixedSize(500, 450)
+        self.resize(560, 640)
+        self.setMinimumSize(500, 550)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.initUI()
         # 应用主题适配
@@ -203,6 +204,18 @@ class ImportExportDialog(QDialog):
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
 
+        transfer_group = QGroupBox('本地迁移包（保留便签全部字段与引用资源）')
+        transfer_layout = QVBoxLayout()
+        transfer_layout.addWidget(QLabel('迁移包为明文 ZIP；默认不包含密码、同步配置和历史。'))
+        transfer_export = QPushButton('导出可迁移包...')
+        transfer_export.clicked.connect(self.export_transfer_package)
+        transfer_layout.addWidget(transfer_export)
+        transfer_import = QPushButton('导入可迁移包...')
+        transfer_import.clicked.connect(self.import_transfer_package)
+        transfer_layout.addWidget(transfer_import)
+        transfer_group.setLayout(transfer_layout)
+        layout.addWidget(transfer_group)
+
         # 导入区域
         import_group = QGroupBox('导入便签')
         import_layout = QVBoxLayout()
@@ -223,6 +236,67 @@ class ImportExportDialog(QDialog):
         layout.addWidget(close_btn)
 
         self.setLayout(layout)
+
+    def export_transfer_package(self):
+        from features.transfer_package import TransferPackageService
+        path, _ = QFileDialog.getSaveFileName(
+            self, '导出可迁移包', 'StickyNote_transfer.zip', 'ZIP 文件 (*.zip)')
+        if not path:
+            return
+        try:
+            self.manager.backup_manager.flush_open_notes()
+            result = TransferPackageService(self.manager.notes_dir).export_package(path)
+            if not result['valid']:
+                raise ValueError('; '.join(result['errors']))
+        except Exception as exc:
+            QMessageBox.warning(self, '导出失败', str(exc))
+            return
+        QMessageBox.information(self, '导出完成',
+            f'已导出 {result["note_count"]} 张便签、{result["attachment_count"]} 个附件。\n{path}')
+
+    def import_transfer_package(self):
+        from features.transfer_package import TransferPackageService
+        path, _ = QFileDialog.getOpenFileName(
+            self, '导入可迁移包', '', 'ZIP 文件 (*.zip)')
+        if not path:
+            return
+        service = TransferPackageService(self.manager.notes_dir)
+        preview = service.preview_package(path)
+        if not preview['valid']:
+            QMessageBox.warning(self, '校验失败', '\n'.join(preview['errors']))
+            return
+        if not preview['destination_empty']:
+            QMessageBox.warning(self, '目标库非空', '迁移包只导入空白便签库，请先备份并清理目标库。')
+            return
+        if QMessageBox.question(self, '确认迁移',
+                f'将导入 {preview["note_count"]} 张便签、{preview["attachment_count"]} 个附件。'
+                '导入前会保存当前库的安全备份。继续？',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.manager.backup_manager.flush_open_notes()
+        placeholder = service._placeholder()
+        placeholder_uuid = None
+        if placeholder:
+            note_id = int(os.path.basename(placeholder)[5:-5])
+            note = self.manager.notes.get(note_id)
+            placeholder_uuid = note.note_data.get('note_uuid') if note else None
+        def safety_backup():
+            backup = self.manager.backup_manager.create_backup()
+            return bool(backup and self.manager.backup_manager.preview_backup(backup)['valid'])
+        try:
+            service.import_package(path, safety_backup=safety_backup)
+            if placeholder:
+                self.manager._close_note_for_lifecycle(note_id)
+                self.manager.history_store.remove_note(placeholder_uuid)
+            if self.manager._tag_manager is not None:
+                self.manager._tag_manager.tags = self.manager._tag_manager.load_tags()
+            self.manager.load_notes()
+            self.manager.search_manager.refresh_index()
+            self.manager.update_tray_menu()
+        except Exception as exc:
+            QMessageBox.warning(self, '导入失败', str(exc))
+            return
+        QMessageBox.information(self, '导入完成', f'成功导入 {preview["note_count"]} 张便签。')
 
     def export_notes(self):
         selected = self.export_list.selectedItems()

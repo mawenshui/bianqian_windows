@@ -1472,7 +1472,13 @@ class SettingsDialog(QDialog):
     def _on_master_pwd_toggled(self):
         enabled = self.master_pwd_checkbox.isChecked()
         if enabled:
-            # 启用主密码 — 直接保存配置
+            if not self.manager.config.get('security.master_password_hash', ''):
+                self._on_set_master_password()
+                if not self.manager.config.get('security.master_password_hash', ''):
+                    self.master_pwd_checkbox.blockSignals(True)
+                    self.master_pwd_checkbox.setChecked(False)
+                    self.master_pwd_checkbox.blockSignals(False)
+                    return
             self.manager.config.set('security.require_master_password', True)
         else:
             # 禁用主密码 — 需要先验证当前密码
@@ -1511,6 +1517,9 @@ class SettingsDialog(QDialog):
             
             try:
                 if enc.verify_password(password, master_hash, master_salt):
+                    history_store = getattr(self.manager, 'history_store', None)
+                    if history_store is not None:
+                        history_store.disable_password()
                     self.manager.config.set('security.require_master_password', False)
                     QMessageBox.information(self, '已禁用', '主密码已禁用。')
                 else:
@@ -1532,10 +1541,15 @@ class SettingsDialog(QDialog):
                 password = dialog.get_password()
                 if password:
                     from features.encryption import NoteEncryption
+                    history_store = getattr(self.manager, 'history_store', None)
+                    if history_store is not None:
+                        history_store.change_password(password)
                     result = NoteEncryption.hash_master_password(password)
                     self.manager.config.set('security.master_password_hash', result['hash'])
                     self.manager.config.set('security.master_password_salt', result['salt'])
                     self.manager.config.set('security.require_master_password', True)
+                    if history_store is not None:
+                        history_store.finalize_password_change()
                     self.master_pwd_checkbox.setChecked(True)
                     QMessageBox.information(self, '设置成功', '主密码已设置。')
         except Exception as e:
