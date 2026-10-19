@@ -11,6 +11,9 @@
 
 import os
 import json
+import re
+import tempfile
+import uuid
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -68,24 +71,50 @@ class TemplateManager:
         result = {}
         if os.path.exists(self.templates_dir):
             for filename in os.listdir(self.templates_dir):
-                if filename.endswith('.json'):
+                if filename.endswith('.json') and self._valid_key(filename[:-5]):
                     try:
                         with open(os.path.join(self.templates_dir, filename), 'r', encoding='utf-8') as f:
                             data = json.load(f)
+                        if (not isinstance(data, dict)
+                                or not isinstance(data.get('name'), str)
+                                or not isinstance(data.get('content'), str)):
+                            raise ValueError('模板内容无效')
                         key = filename[:-5]
                         result[key] = data
                     except Exception as e:
                         print(f"[TemplateManager] 加载模板失败 {filename}: {e}")
         return result
 
+    @staticmethod
+    def _valid_key(key):
+        return (isinstance(key, str)
+                and re.fullmatch(r'[A-Za-z0-9_]{1,64}', key) is not None
+                and key not in BUILTIN_TEMPLATES)
+
+    def _template_path(self, key):
+        if not self._valid_key(key):
+            raise ValueError('无效的自定义模板标识')
+        return os.path.join(self.templates_dir, f'{key}.json')
+
     def save_custom_template(self, key: str, data: dict):
-        filepath = os.path.join(self.templates_dir, f'{key}.json')
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        filepath = self._template_path(key)
+        if not isinstance(data, dict):
+            raise ValueError('模板数据必须是对象')
+        descriptor, temporary = tempfile.mkstemp(prefix='.template_', suffix='.tmp',
+                                                  dir=self.templates_dir)
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, filepath)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
         self.custom_templates[key] = data
 
     def delete_custom_template(self, key: str):
-        filepath = os.path.join(self.templates_dir, f'{key}.json')
+        filepath = self._template_path(key)
         if os.path.exists(filepath):
             os.remove(filepath)
         self.custom_templates.pop(key, None)
@@ -249,10 +278,10 @@ class TemplateDialog(QDialog):
             return
 
         # 生成 key
-        import re
-        key = re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())[:30]
-        if key in BUILTIN_TEMPLATES:
-            key += '_custom'
+        base = re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())[:30].strip('_') or 'template'
+        key = base
+        while key in self.template_manager.get_all_templates():
+            key = f'{base[:20]}_{uuid.uuid4().hex[:8]}'
 
         data = {
             'name': name,

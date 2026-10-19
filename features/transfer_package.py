@@ -21,6 +21,13 @@ _STYLE = re.compile(r'styles/[A-Za-z0-9_.-]+\.css$')
 _LIMIT = 512 * 1024 * 1024
 
 
+def _safe_asset_name(name):
+    """Reject names Windows cannot store as ordinary files (including ADS)."""
+    basename = name.rsplit('/', 1)[-1]
+    return (bool(basename) and not basename.endswith((' ', '.'))
+            and not any(ord(char) < 32 or char in '<>:"|?*' for char in basename))
+
+
 class TransferPackageService:
     def __init__(self, notes_dir, data_dir=None, styles_dir=None):
         self.notes_dir = os.path.realpath(notes_dir)
@@ -43,11 +50,31 @@ class TransferPackageService:
             with open(path, encoding='utf-8') as stream:
                 data = json.load(stream)
             note_id = int(names[0][5:-5])
-            if (data.get('title') == f'便签 {note_id}'
-                    and not data.get('plain_content') and not data.get('content')
+            content = data.get('content') or ''
+            if not isinstance(content, str):
+                return None
+            # Qt serializes an empty rich-text editor as nonempty HTML.
+            from PyQt5.QtGui import QTextDocument
+            document = QTextDocument()
+            document.setHtml(content)
+            blank_html = (not document.toPlainText().strip()
+                          and not re.search(r'<(?:img|object|iframe|svg|video|audio|table)\b',
+                                            content, re.IGNORECASE))
+            defaults = {'pinned': False, 'favorite': False, 'locked': False,
+                        'archived': False, 'edge_collapsed': False,
+                        'theme': 'soft_yellow.css',
+                        'always_on_top': True, 'background_text_color': '',
+                        'background_control_color': '', 'font_color': '#000000',
+                        'font_color_mode': 'theme', 'markdown_content': ''}
+            if (data.get('auto_placeholder') is True
+                    and data.get('title') == f'便签 {note_id}'
+                    and not data.get('plain_content') and blank_html
                     and not data.get('attachments') and not data.get('checklist')
                     and not data.get('background_image') and not data.get('reminder')
-                    and not data.get('tags')):
+                    and not data.get('tags')
+                    and all(data.get(key, expected) == expected
+                            for key, expected in defaults.items())
+                    and abs(float(data.get('opacity', 0.9)) - 0.9) < 0.01):
                 return path
         except (OSError, ValueError, TypeError):
             pass
@@ -67,23 +94,29 @@ class TransferPackageService:
             files['notes/' + name] = source
             for entry in data.get('attachments', []):
                 relative = entry.get('path', '') if isinstance(entry, dict) else ''
+                if not _ASSET.fullmatch('notes/' + relative) or not _safe_asset_name(relative):
+                    raise ValueError(f'附件路径无效: {relative}')
                 path = attachment_path(self.notes_dir, relative)
                 if not os.path.isfile(path) or os.path.islink(path):
                     raise ValueError(f'附件缺失或无效: {relative}')
                 files['notes/' + relative] = path
             background = data.get('background_image', '')
             if background:
-                if not re.fullmatch(r'images/background_[1-9]\d*_[^/\\]+', background):
+                if (not re.fullmatch(r'images/background_[1-9]\d*_[^/\\]+', background)
+                        or not _safe_asset_name(background)):
                     raise ValueError('背景路径无效')
                 path = os.path.join(self.notes_dir, *background.split('/'))
                 if not os.path.isfile(path) or os.path.islink(path):
                     raise ValueError(f'背景图片缺失: {background}')
                 files['notes/' + background] = path
             theme = data.get('theme', '')
-            if theme and re.fullmatch(r'[A-Za-z0-9_.-]+\.css', theme):
+            if theme:
+                if not isinstance(theme, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.css', theme):
+                    raise ValueError(f'主题路径无效: {theme}')
                 path = os.path.join(self.styles_dir, theme)
-                if os.path.isfile(path) and not os.path.islink(path):
-                    files['styles/' + theme] = path
+                if not os.path.isfile(path) or os.path.islink(path):
+                    raise ValueError(f'主题资源缺失: {theme}')
+                files['styles/' + theme] = path
         tags = os.path.join(self.data_dir, 'tags.json')
         if os.path.isfile(tags) and not os.path.islink(tags):
             files['tags.json'] = tags
@@ -128,14 +161,15 @@ class TransferPackageService:
                 for info in entries:
                     name = info.filename
                     if not (name in ('manifest.json', 'tags.json') or _NOTE.fullmatch(name)
-                            or _ASSET.fullmatch(name) or _STYLE.fullmatch(name)):
+                            or (_ASSET.fullmatch(name) and _safe_asset_name(name))
+                            or _STYLE.fullmatch(name)):
                         raise ValueError(f'不安全或未知路径: {name}')
                     if (info.external_attr >> 16) & 0o170000 == 0o120000:
                         raise ValueError(f'不允许符号链接: {name}')
                 if archive.testzip() is not None:
                     raise ValueError('ZIP CRC 校验失败')
                 manifest = json.loads(archive.read('manifest.json'))
-                if manifest.get('package_type') != 'stickynote-transfer' or manifest.get('schema_version') != 1:
+                if not isinstance(manifest, dict) or manifest.get('package_type') != 'stickynote-transfer' or manifest.get('schema_version') != 1:
                     raise ValueError('未知迁移包版本')
                 expected = manifest.get('files')
                 if not isinstance(expected, dict) or set(expected) != set(names) - {'manifest.json'}:
@@ -156,13 +190,15 @@ class TransferPackageService:
                     for entry in data.get('attachments', []):
                         relative = entry.get('path', '') if isinstance(entry, dict) else ''
                         asset = 'notes/' + relative
-                        if not _ASSET.fullmatch(asset) or not asset.startswith(f'notes/attachments/note_{note_id}/'):
+                        if (not _ASSET.fullmatch(asset) or not _safe_asset_name(asset)
+                                or not asset.startswith(f'notes/attachments/note_{note_id}/')):
                             raise ValueError(f'附件路径无效: {name}')
                         referenced.add(asset)
                     background = data.get('background_image', '')
                     if background:
                         asset = 'notes/' + background
-                        if not _ASSET.fullmatch(asset) or not asset.startswith(f'notes/images/background_{note_id}_'):
+                        if (not _ASSET.fullmatch(asset) or not _safe_asset_name(asset)
+                                or not asset.startswith(f'notes/images/background_{note_id}_')):
                             raise ValueError(f'背景路径无效: {name}')
                         referenced.add(asset)
                     theme = data.get('theme', '')
@@ -179,7 +215,8 @@ class TransferPackageService:
                 result['attachment_count'] = sum('/attachments/' in n for n in names)
                 result['style_count'] = sum(n.startswith('styles/') for n in names)
                 result['valid'] = True
-        except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError,
+                zipfile.BadZipFile, json.JSONDecodeError) as exc:
             result['errors'].append(str(exc))
         return result
 
@@ -259,8 +296,6 @@ class TransferPackageService:
         from PyQt5.QtCore import QPoint
         from PyQt5.QtWidgets import QApplication
         app = QApplication.instance()
-        if app is None or app.primaryScreen() is None:
-            return
         notes = os.path.join(stage, 'notes')
         for name in os.listdir(notes):
             if not _NOTE.fullmatch('notes/' + name):
@@ -268,8 +303,10 @@ class TransferPackageService:
             path = os.path.join(notes, name)
             with open(path, encoding='utf-8') as stream:
                 data = json.load(stream)
-            changed = False
+            changed = bool(data.pop('auto_placeholder', False))
             for key in ('geometry', 'pre_hide_geometry'):
+                if app is None or app.primaryScreen() is None:
+                    break
                 geo = data.get(key)
                 if not isinstance(geo, dict):
                     continue

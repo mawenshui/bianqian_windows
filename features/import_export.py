@@ -273,7 +273,11 @@ class ImportExportDialog(QDialog):
                 '导入前会保存当前库的安全备份。继续？',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-        self.manager.backup_manager.flush_open_notes()
+        try:
+            self.manager.backup_manager.flush_open_notes()
+        except Exception as exc:
+            QMessageBox.warning(self, '导入未开始', f'便签保存失败，未导入迁移包：{exc}')
+            return
         placeholder = service._placeholder()
         placeholder_uuid = None
         if placeholder:

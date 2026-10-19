@@ -7,6 +7,9 @@ WebDAV 同步客户端
 
 import os
 import logging
+import hashlib
+import tempfile
+import re
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ class WebDAVClient:
         self.password = password
         self.remote_path = remote_path.rstrip('/') + '/'
         self._client = None
+        self._hash_cache = {}
 
     def _ensure_client(self):
         if not HAS_WEBDAV:
@@ -100,23 +104,41 @@ class WebDAVClient:
             return False
 
     def get_file_hashes(self) -> Dict[str, str]:
-        """
-        获取远端所有文件的哈希值
-
-        注意：WebDAV 标准不直接提供文件哈希，这里通过 ETag 近似
-        """
+        """Return real SHA-256 values; ETag only avoids unchanged downloads."""
         result = {}
         try:
             client = self._ensure_client()
-            files = self.list_files()
-            for filename in files:
+            files = client.list(self.remote_path)
+            for item in files:
+                filename = os.path.basename(str(item).rstrip('/'))
+                if not re.fullmatch(r'note_[1-9]\d*\.json', filename):
+                    continue
                 remote = self.remote_path + filename
                 try:
                     info = client.info(remote)
-                    etag = info.get('etag', '')
-                    result[filename] = etag
+                    etag = str(info.get('etag', ''))
                 except Exception:
-                    result[filename] = ''
+                    etag = ''
+                cached = self._hash_cache.get(filename)
+                if etag and cached and cached[0] == etag:
+                    result[filename] = cached[1]
+                    continue
+                descriptor, temporary = tempfile.mkstemp(prefix='stickynote_webdav_', suffix='.tmp')
+                os.close(descriptor)
+                try:
+                    if client.download(remote, temporary) is False:
+                        raise OSError(f'远端下载失败: {filename}')
+                    digest = hashlib.sha256()
+                    with open(temporary, 'rb') as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                            digest.update(chunk)
+                    result[filename] = digest.hexdigest()
+                    if etag:
+                        self._hash_cache[filename] = (etag, result[filename])
+                finally:
+                    if os.path.exists(temporary):
+                        os.remove(temporary)
         except Exception as e:
             logger.error(f'获取远端文件信息失败: {e}')
+            raise OSError(f'远端文件列表或内容读取失败: {e}') from e
         return result

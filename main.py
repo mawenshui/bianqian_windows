@@ -171,6 +171,8 @@ def _perform_reset(mode: int, config) -> bool:
         history_dir = os.path.join(get_user_data_dir(), 'history')
         if os.path.isdir(history_dir):
             shutil.rmtree(history_dir)
+        from features.note_history import forget_history_store
+        forget_history_store(notes_dir)
         presentation_file = os.path.join(user_data_dir, 'presentation_state.json')
         if os.path.isfile(presentation_file):
             os.remove(presentation_file)

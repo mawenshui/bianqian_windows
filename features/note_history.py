@@ -231,8 +231,17 @@ class NoteHistoryStore:
             self._require_unlocked()
             paths = self._paths(note_uuid)
             fingerprint = self._semantic_hash(data)
-            if paths:
-                last = self._read_payload(paths[-1])
+            last = None
+            damaged = False
+            for path in reversed(paths):
+                try:
+                    last = self._read_payload(path)
+                    break
+                except (OSError, ValueError, TypeError, KeyError,
+                        zipfile.BadZipFile, InvalidTag) as exc:
+                    damaged = True
+                    logger.warning('跳过损坏的便签历史 %s: %s', path, exc)
+            if last is not None and not damaged:
                 if last['fingerprint'] == fingerprint:
                     return False
                 age = datetime.now(timezone.utc) - datetime.fromisoformat(last['created_at'])
@@ -270,15 +279,29 @@ class NoteHistoryStore:
             if 'note.json' not in names or len(names) != len(set(names)):
                 raise ValueError('历史记录文件清单无效')
             payload = json.loads(archive.read('note.json'))
-            if payload.get('format') != 1 or not isinstance(payload.get('data'), dict):
+            if (not isinstance(payload, dict) or payload.get('format') != 1
+                    or not isinstance(payload.get('data'), dict)
+                    or not isinstance(payload.get('fingerprint'), str)
+                    or not isinstance(payload.get('created_at'), str)):
                 raise ValueError('历史记录版本或数据无效')
+            created_at = datetime.fromisoformat(payload['created_at'])
+            if created_at.tzinfo is None:
+                raise ValueError('历史记录时间缺少时区')
             return payload
 
     def list_versions(self, note_uuid):
         with self._lock:
             self._require_unlocked()
-            return [self._read_payload(path) | {'snapshot': os.path.basename(path)}
-                    for path in reversed(self._paths(note_uuid))]
+            versions = []
+            for path in reversed(self._paths(note_uuid)):
+                try:
+                    versions.append(self._read_payload(path) | {
+                        'snapshot': os.path.basename(path)})
+                except (OSError, ValueError, TypeError, KeyError,
+                        zipfile.BadZipFile, InvalidTag) as exc:
+                    self.last_warning = '部分历史版本损坏，已跳过；当前便签未受影响。'
+                    logger.warning('跳过损坏的便签历史 %s: %s', path, exc)
+            return versions
 
     def restore_data(self, note_uuid, snapshot):
         """Return a verified prior note and resources without changing the live note."""
@@ -290,6 +313,9 @@ class NoteHistoryStore:
                 raw = self._open(stream.read())
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 payload = json.loads(archive.read('note.json'))
+                if (not isinstance(payload, dict) or payload.get('format') != 1
+                        or not isinstance(payload.get('data'), dict)):
+                    raise ValueError('历史记录版本或数据无效')
                 if payload.get('note_uuid') != note_uuid:
                     raise ValueError('历史记录归属不符')
                 data = payload['data']
@@ -369,6 +395,16 @@ def get_history_store(notes_dir):
         if root not in _stores:
             _stores[root] = NoteHistoryStore(root)
         return _stores[root]
+
+
+def forget_history_store(notes_dir):
+    """Discard a cached in-memory key after a full data/password reset."""
+    root = os.path.realpath(notes_dir)
+    with _stores_lock:
+        store = _stores.pop(root, None)
+        if store is not None:
+            with store._lock:
+                store._key = None
 
 
 class NoteHistoryDialog:

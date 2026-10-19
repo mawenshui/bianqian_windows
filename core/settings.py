@@ -1460,7 +1460,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(master_group)
 
         # 加密说明
-        info_label = QLabel("安全说明：便签加密使用 AES-256-GCM，密钥通过 PBKDF2 派生（480000 轮）。\n"
+        info_label = QLabel("安全说明：主密码用于启动验证；启用后，历史快照使用 AES-GCM 加密，"
+                           "数据密钥由主密码经 PBKDF2（480000 轮）封装。\n"
+                           "便签正文、附件、整库备份和迁移包仍为本地明文；单张锁定只限制编辑。"
                            "密码哈希使用 Argon2id（回退到 PBKDF2）。")
         info_label.setWordWrap(True)
         info_label.setProperty('settingsRole', 'muted')

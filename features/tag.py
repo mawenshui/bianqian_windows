@@ -13,6 +13,7 @@
 
 import os
 import json
+import tempfile
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -48,17 +49,33 @@ class TagManager:
         if os.path.exists(self.tags_file):
             try:
                 with open(self.tags_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if (isinstance(data, dict) and all(
+                        isinstance(name, str) and isinstance(color, str)
+                        for name, color in data.items())):
+                    return data
             except Exception:
                 pass
         return {}
 
     def save_tags(self):
+        temporary = None
         try:
-            with open(self.tags_file, 'w', encoding='utf-8') as f:
-                json.dump(self.tags, f, ensure_ascii=False, indent=2)
+            directory = os.path.dirname(self.tags_file)
+            os.makedirs(directory, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(prefix='.tags_', suffix='.tmp', dir=directory)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                json.dump(self.tags, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.tags_file)
+            return True
         except Exception as e:
             print(f"[TagManager] 保存标签失败: {e}")
+            return False
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)
 
     def add_tag(self, name: str, color: str = None) -> bool:
         name = name.strip()
@@ -74,13 +91,17 @@ class TagManager:
             if color is None:
                 color = TAG_COLORS[len(self.tags) % len(TAG_COLORS)]
         self.tags[name] = color
-        self.save_tags()
-        return True
+        if self.save_tags():
+            return True
+        self.tags.pop(name, None)
+        return False
 
     def remove_tag(self, name: str):
         if name in self.tags:
-            del self.tags[name]
-            self.save_tags()
+            color = self.tags.pop(name)
+            if not self.save_tags():
+                self.tags[name] = color
+                return False
             # 从所有便签中移除该标签
             for note in self.manager.notes.values():
                 tags = note.note_data.get('tags', [])
@@ -88,14 +109,20 @@ class TagManager:
                     tags.remove(name)
                     note.note_data['tags'] = tags
                     note.save_note()
+            return True
+        return False
 
     def rename_tag(self, old_name: str, new_name: str) -> bool:
         new_name = new_name.strip()
         if not new_name or new_name in self.tags:
             return False
         if old_name in self.tags:
-            self.tags[new_name] = self.tags.pop(old_name)
-            self.save_tags()
+            color = self.tags.pop(old_name)
+            self.tags[new_name] = color
+            if not self.save_tags():
+                self.tags.pop(new_name, None)
+                self.tags[old_name] = color
+                return False
             for note in self.manager.notes.values():
                 tags = note.note_data.get('tags', [])
                 if old_name in tags:
@@ -107,8 +134,13 @@ class TagManager:
 
     def set_tag_color(self, name: str, color: str):
         if name in self.tags:
+            previous = self.tags[name]
             self.tags[name] = color
-            self.save_tags()
+            if not self.save_tags():
+                self.tags[name] = previous
+                return False
+            return True
+        return False
 
     def get_tag_color(self, name: str) -> str:
         return self.tags.get(name, '#888888')

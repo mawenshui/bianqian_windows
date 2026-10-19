@@ -121,7 +121,8 @@ class SyncEngine(QObject):
 
             try:
                 if action == 'upload':
-                    self._client.upload_file(local_path, filename)
+                    if self._client.upload_file(local_path, filename) is False:
+                        raise OSError('上传失败')
                     local_hash = SyncMetadata.compute_hash(local_path)
                     self.metadata.update_file_meta(
                         filename, local_hash=local_hash,
@@ -131,7 +132,16 @@ class SyncEngine(QObject):
                     summary['uploaded'] += 1
 
                 elif action == 'download':
-                    self._client.download_file(filename, local_path)
+                    temporary = local_path + '.download_tmp'
+                    try:
+                        if self._client.download_file(filename, temporary) is False:
+                            raise OSError('下载失败')
+                        if not os.path.isfile(temporary):
+                            raise OSError('下载未生成文件')
+                        os.replace(temporary, local_path)
+                    finally:
+                        if os.path.exists(temporary):
+                            os.remove(temporary)
                     local_hash = SyncMetadata.compute_hash(local_path)
                     self.metadata.update_file_meta(
                         filename, local_hash=local_hash,
@@ -143,18 +153,29 @@ class SyncEngine(QObject):
                 elif action == 'conflict':
                     # 下载远端版本到临时文件
                     temp_path = local_path + '.remote_tmp'
-                    self._client.download_file(filename, temp_path)
-
-                    winner = ConflictResolver.resolve(local_path, temp_path, strategy)
-                    if winner == temp_path:
-                        import shutil
-                        shutil.move(temp_path, local_path)
-                    else:
+                    try:
+                        if self._client.download_file(filename, temp_path) is False:
+                            raise OSError('冲突版本下载失败')
+                        if not os.path.isfile(temp_path):
+                            raise OSError('冲突版本下载未生成文件')
+                        if strategy == 'both':
+                            copy_path = ConflictResolver.create_conflict_copy(
+                                local_path, 'remote', content_path=temp_path,
+                                output_dir=os.path.join(self.notes_dir, 'conflicts'))
+                            if not os.path.isfile(copy_path):
+                                raise OSError('远端冲突副本保存失败')
+                            # Preserve the downloaded remote bytes, then use
+                            # the local primary as the shared authoritative file.
+                            if self._client.upload_file(local_path, filename) is False:
+                                raise OSError('冲突主版本上传失败')
+                        else:
+                            winner = ConflictResolver.resolve(local_path, temp_path, strategy)
+                            if winner == temp_path:
+                                import shutil
+                                shutil.move(temp_path, local_path)
+                    finally:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-
-                    if strategy == 'both':
-                        ConflictResolver.create_conflict_copy(temp_path if os.path.exists(temp_path) else local_path, 'remote')
 
                     local_hash = SyncMetadata.compute_hash(local_path)
                     self.metadata.update_file_meta(
@@ -170,7 +191,8 @@ class SyncEngine(QObject):
                     self.metadata.remove_file(filename)
 
                 elif action == 'delete_remote':
-                    self._client.delete_file(filename)
+                    if self._client.delete_file(filename) is False:
+                        raise OSError('远端删除失败')
                     self.metadata.remove_file(filename)
 
             except Exception as e:

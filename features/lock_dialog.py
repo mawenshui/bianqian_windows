@@ -129,7 +129,7 @@ class SetPasswordDialog(QDialog):
         title_label.setStyleSheet('font-size: 12pt; font-weight: bold;')
         layout.addWidget(title_label)
 
-        hint_label = QLabel('设置密码后，便签内容将被加密保护。')
+        hint_label = QLabel('设置密码后需解锁才能编辑；便签文件仍为本地明文。')
         hint_label.setStyleSheet('color: #666;')
         hint_label.setWordWrap(True)
         layout.addWidget(hint_label)

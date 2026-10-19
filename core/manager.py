@@ -450,15 +450,19 @@ class StickyNoteManager:
 
     def show_note_history(self, note_id: int) -> None:
         from features.note_history import NoteHistoryDialog
-        self._save_open_note_for_lifecycle(note_id)
+        try:
+            self._save_open_note_for_lifecycle(note_id)
+        except OSError as exc:
+            QMessageBox.warning(None, '历史记录未打开', str(exc))
+            return
         NoteHistoryDialog(self, note_id).exec_()
 
     def restore_note_history(self, note_id: int, snapshot: str) -> None:
         """Restore only note content fields, keeping its current window state."""
         from features.attachments import attachment_path
         note = self.notes.get(note_id)
-        if note is not None:
-            note.save_note_sync()
+        if note is not None and note.save_note_sync() is False:
+            raise OSError(f'便签 {note_id} 保存失败，无法恢复历史')
         path = self.lifecycle.note_path(note_id)
         with open(path, encoding='utf-8') as stream:
             current = json.load(stream)
@@ -838,11 +842,14 @@ class StickyNoteManager:
 
     # ==================== 便签管理 ====================
 
-    def add_note(self) -> None:
+    def add_note(self, initial_placeholder=False) -> None:
         note_id = self.generate_note_id()
         logger.info(f'创建新便签 #{note_id}')
         default_theme_css = self.get_default_theme_css()
         new_note = StickyNote(note_id, self.notes_dir, manager=self, theme_css=default_theme_css)
+        if initial_placeholder:
+            new_note.note_data['auto_placeholder'] = True
+            new_note.save_note_sync()
         if self.presentation_active:
             new_note.save_note_sync()
             self._presentation_snapshot[str(note_id)] = {'visible': False, 'edge': False}
@@ -915,7 +922,10 @@ class StickyNoteManager:
             return
         snapshot = {}
         for note_id, note in self.notes.items():
-            note.save_note_sync()
+            if note.save_note_sync() is False:
+                QMessageBox.warning(None, '演示遮蔽未开启',
+                                    f'便签 {note_id} 保存失败，请检查磁盘后重试。')
+                return
             snapshot[str(note_id)] = {
                 'visible': bool(note.isVisible()),
                 'edge': bool(note.auto_hidden or note._hover_restored),
@@ -978,7 +988,8 @@ class StickyNoteManager:
             worker = getattr(note, '_save_worker', None)
             if worker is not None and worker.isRunning():
                 worker.wait()
-            note.save_note_sync()
+            if note.save_note_sync() is False:
+                raise OSError(f'便签 {note_id} 保存失败，操作已取消')
 
     def archive_note(self, note_id):
         self._save_open_note_for_lifecycle(note_id)
@@ -1327,7 +1338,7 @@ class StickyNoteManager:
                 loader.start()
         else:
             # 没有便签数据文件：创建默认便签并更新托盘菜单
-            self.add_note()
+            self.add_note(initial_placeholder=True)
             self.update_tray_menu()
 
     def _on_note_data_loaded(self, note_id: int, data: dict) -> None:
@@ -1921,6 +1932,14 @@ class StickyNoteManager:
 
     def exit_application(self) -> None:
         logger.info(f'应用退出，正在保存 {len(self.notes)} 个便签...')
+        failed = []
+        for note in list(self.notes.values()):
+            if note.save_note_sync() is False:
+                failed.append(note.note_id)
+        if failed:
+            QMessageBox.warning(None, '无法安全退出',
+                                f'便签 {", ".join(map(str, failed))} 保存失败；应用保持运行，请检查磁盘后重试。')
+            return
         try:
             self.shortcut_manager.cleanup()
         except Exception as e:
@@ -1941,10 +1960,6 @@ class StickyNoteManager:
         for note in list(self.notes.values()):
             note.is_deleted = True
             note._save_timer.stop()
-            try:
-                note.save_note_sync()
-            except Exception as e:
-                logger.error(f'关闭时保存便签 {note.note_id} 失败: {e}')
             note.close()
         self.tray_icon.hide()
         QCoreApplication.quit()

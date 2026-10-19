@@ -63,6 +63,19 @@ def test_presentation_state_is_written_before_windows_hide(tmp_path):
     assert not manager.presentation_state.read()['active']
 
 
+def test_presentation_does_not_hide_windows_after_save_failure(tmp_path, monkeypatch):
+    visible = _Note(True)
+    visible.save_note_sync = lambda: False
+    manager = _manager(tmp_path, {1: visible})
+    from unittest.mock import Mock
+    warning = Mock()
+    monkeypatch.setattr('core.manager.QMessageBox.warning', warning)
+    manager.start_presentation_mode()
+    assert visible.visible and not manager.presentation_active
+    assert not manager.presentation_state.read()['active']
+    warning.assert_called_once()
+
+
 def test_presentation_state_survives_restart(tmp_path):
     state = PresentationState(str(tmp_path))
     state.write(True, {'7': {'visible': True, 'edge': False}})

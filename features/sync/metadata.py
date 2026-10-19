@@ -106,19 +106,11 @@ class SyncMetadata:
             remote_changed = remote_hash != base_hash and remote_hash != ''
 
             if local_hash and not remote_hash:
-                if base_hash:
-                    # 远端删除了，本地也删除
-                    changes[filename] = 'delete_local'
-                else:
-                    # 新本地文件
-                    changes[filename] = 'upload'
+                # Without tombstones, a missing peer may mean an offline or
+                # damaged listing. Keep the only known copy.
+                changes[filename] = 'upload'
             elif not local_hash and remote_hash:
-                if base_hash:
-                    # 本地删除了，远端也删除
-                    changes[filename] = 'delete_remote'
-                else:
-                    # 新远端文件
-                    changes[filename] = 'download'
+                changes[filename] = 'download'
             elif local_changed and not remote_changed:
                 changes[filename] = 'upload'
             elif remote_changed and not local_changed:

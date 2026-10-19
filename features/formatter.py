@@ -330,14 +330,12 @@ class SmartTextEdit(QTextEdit):
         """重写粘贴方法"""
         from PyQt5.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
-        
-        if self.auto_format_enabled:
-            text = clipboard.text()
-            formatted_text, content_type = self.formatter.format_content(text)
-            
-            if content_type != 'plain':
-                self.insertPlainText(formatted_text)
-            else:
-                self.insertPlainText(text)
+        if not self.auto_format_enabled or not clipboard.mimeData().hasText():
+            super().paste()
+            return
+        text = clipboard.text()
+        formatted_text, content_type = self.formatter.format_content(text)
+        if content_type != 'plain':
+            self.insertPlainText(formatted_text)
         else:
-            self.insertPlainText(clipboard.text())
+            self.insertPlainText(text)

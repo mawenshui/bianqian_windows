@@ -45,6 +45,8 @@ from core.ui_preferences import (
     normalize_settings_tool_order,
 )
 
+logger = logging.getLogger(__name__)
+
 # 窗口调整大小检测边界宽度
 RESIZE_MARGIN = 10
 
@@ -3209,18 +3211,19 @@ class StickyNote(QWidget):
 
         取消防抖定时器并立即同步写入磁盘。
         """
-        self._save_timer.stop()
-        # 先收集数据
-        self.save_note()
-        # 立即停止防抖并同步写入
-        self._save_timer.stop()
         try:
+            self._save_timer.stop()
+            # 先收集数据，再立即停止防抖并同步写入。
+            self.save_note()
+            self._save_timer.stop()
             worker = getattr(self, '_save_worker', None)
             if worker is not None and worker.isRunning():
                 worker.wait()
             _atomic_write_note(self.note_file, self.note_data, self.history_store)
-        except Exception as e:
-            print(f"[StickyNote] 同步保存失败: {e}")
+            return True
+        except Exception:
+            logger.exception('便签同步保存失败: %s', self.note_file)
+            return False
 
     # ==================== UI 事件处理 ====================
 

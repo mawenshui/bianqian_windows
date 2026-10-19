@@ -12,6 +12,7 @@ import json
 import os
 import logging
 import threading
+import tempfile
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Optional
 
@@ -57,14 +58,18 @@ class AsyncFileWorker(QThread):
                     self.read_failed.emit(self.file_path, '文件不存在')
 
             elif self.operation == 'write':
-                os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-                tmp_path = self.file_path + '.tmp'
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.data, f, ensure_ascii=False, indent=4)
-                if os.path.exists(self.file_path):
-                    os.replace(tmp_path, self.file_path)
-                else:
-                    os.rename(tmp_path, self.file_path)
+                directory = os.path.dirname(os.path.abspath(self.file_path))
+                os.makedirs(directory, exist_ok=True)
+                descriptor, temporary = tempfile.mkstemp(prefix='.json_', suffix='.tmp', dir=directory)
+                try:
+                    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                        json.dump(self.data, stream, ensure_ascii=False, indent=4)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, self.file_path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.remove(temporary)
                 self.write_completed.emit(self.file_path)
 
         except Exception as e:
@@ -162,12 +167,13 @@ class NoteDataCache:
 
     def stats(self) -> dict:
         with self._lock:
+            total = self._hits + self._misses
             return {
                 'size': len(self._cache),
                 'max_size': self._max_size,
                 'hits': self._hits,
                 'misses': self._misses,
-                'hit_rate': self.hit_rate,
+                'hit_rate': self._hits / total if total else 0.0,
             }
 
 

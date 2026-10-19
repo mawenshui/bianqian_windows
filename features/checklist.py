@@ -231,7 +231,10 @@ def update_checklist_item(manager, note_id, item_id, expected_text, done):
     items = data.get('checklist', [])
     if isinstance(item_id, str) and item_id.startswith('legacy:'):
         try:
-            legacy_index = int(item_id.split(':', 1)[1])
+            suffix = item_id.split(':', 1)[1]
+            if not re.fullmatch(r'(?:0|[1-9]\d*)', suffix):
+                raise ValueError('invalid legacy index')
+            legacy_index = int(suffix)
             entry = items[legacy_index]
             if not isinstance(entry, dict) or entry.get('item_id'):
                 entry = None

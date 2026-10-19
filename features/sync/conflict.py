@@ -51,7 +51,9 @@ class ConflictResolver:
             return local_path
 
     @staticmethod
-    def create_conflict_copy(file_path: str, source: str) -> str:
+    def create_conflict_copy(file_path: str, source: str,
+                             content_path: str = None,
+                             output_dir: str = None) -> str:
         """
         创建冲突副本文件
 
@@ -63,10 +65,13 @@ class ConflictResolver:
             冲突副本文件路径
         """
         base, ext = os.path.splitext(file_path)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        conflict_path = f'{base}.conflict_{source}_{timestamp}{ext}'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        name = f'{os.path.basename(base)}.conflict_{source}_{timestamp}{ext}'
+        destination_dir = output_dir or os.path.dirname(file_path)
+        conflict_path = os.path.join(destination_dir, name)
         try:
-            shutil.copy2(file_path, conflict_path)
+            os.makedirs(destination_dir, exist_ok=True)
+            shutil.copy2(content_path or file_path, conflict_path)
             logger.info(f'创建冲突副本: {conflict_path}')
         except Exception as e:
             logger.error(f'创建冲突副本失败: {e}')

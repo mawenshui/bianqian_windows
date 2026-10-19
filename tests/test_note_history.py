@@ -1,8 +1,10 @@
 """Local revision storage, encryption, and resource recovery."""
 
 import json
+import io
 import os
 import uuid
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -89,6 +91,50 @@ def test_corrupt_snapshot_rejected_without_touching_note(tmp_path):
         stream.write(b'corrupt')
     with pytest.raises((ValueError, OSError)):
         store.restore_data(identity, snapshot)
+
+
+def test_corrupt_latest_snapshot_does_not_hide_older_versions_or_block_new_captures(tmp_path):
+    notes = tmp_path / 'notes'
+    notes.mkdir()
+    identity = uuid.uuid4().hex
+    store = NoteHistoryStore(str(notes))
+    assert store.capture(1, _note(identity, 'older'))
+    assert store.capture(1, _note(identity, 'newer'), force=True)
+    latest = store._paths(identity)[-1]
+    with open(latest, 'wb') as stream:
+        stream.write(b'corrupt')
+    versions = store.list_versions(identity)
+    assert [row['data']['plain_content'] for row in versions] == ['older']
+    assert store.capture(1, _note(identity, 'current'))
+    assert [row['data']['plain_content'] for row in store.list_versions(identity)] == [
+        'current', 'older']
+
+
+def test_malformed_but_readable_history_metadata_is_skipped(tmp_path):
+    notes = tmp_path / 'notes'
+    notes.mkdir()
+    identity = uuid.uuid4().hex
+    store = NoteHistoryStore(str(notes))
+    store.capture(1, _note(identity, 'older'))
+    snapshot = store.list_versions(identity)[0]['snapshot']
+    path = store._paths(identity)[0]
+    memory = io.BytesIO()
+    with zipfile.ZipFile(memory, 'w') as archive:
+        archive.writestr('note.json', '[]')
+    with open(path, 'wb') as stream:
+        stream.write(b'P' + memory.getvalue())
+    with pytest.raises(ValueError, match='历史记录版本'):
+        store.restore_data(identity, snapshot)
+    memory = io.BytesIO()
+    with zipfile.ZipFile(memory, 'w') as archive:
+        archive.writestr('note.json', json.dumps({
+            'format': 1, 'note_uuid': identity,
+            'created_at': 'not-a-date', 'fingerprint': 'fake',
+            'data': _note(identity, 'damaged')}))
+    with open(path, 'wb') as stream:
+        stream.write(b'P' + memory.getvalue())
+    assert store.list_versions(identity) == []
+    assert store.capture(1, _note(identity, 'current'))
 
 
 def test_full_backup_includes_history_and_key_metadata(tmp_path):

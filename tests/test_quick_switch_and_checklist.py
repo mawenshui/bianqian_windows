@@ -57,6 +57,16 @@ def test_archived_checklist_is_read_only(tmp_path):
         update_checklist_item(manager, 1, 'a' * 32, '任务', True)
 
 
+def test_invalid_legacy_index_cannot_update_last_checklist_item(tmp_path):
+    manager = _manager(tmp_path)
+    path = manager.lifecycle.note_path(1)
+    manager.lifecycle._write(path, {'title': '任务', 'checklist': [
+        {'text': 'first', 'done': False}, {'text': 'last', 'done': False}]})
+    with pytest.raises(LookupError):
+        update_checklist_item(manager, 1, 'legacy:-1', 'last', True)
+    assert not manager.lifecycle._read(path)['checklist'][-1]['done']
+
+
 def test_quick_switch_keyboard_selects_and_opens(tmp_path, qapp):
     manager = _manager(tmp_path)
     manager.lifecycle._write(manager.lifecycle.note_path(1),

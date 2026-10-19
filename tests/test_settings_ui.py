@@ -21,6 +21,7 @@ from core.settings import (
     _contrast_ratio, _settings_tokens,
 )
 from features.secret_storage import protect_secret, reveal_secret
+from features.lock_dialog import SetPasswordDialog
 
 
 class _FakeConfig:
@@ -159,6 +160,19 @@ class TestSettingsDialogUI(unittest.TestCase):
         self.assertIsNotNone(header_icon)
         self.assertFalse(header_icon.pixmap().isNull())
         self.assertEqual(header_icon.focusPolicy(), Qt.NoFocus)
+
+    def test_password_copy_describes_actual_data_protection(self):
+        labels = '\n'.join(label.text() for label in self.dialog.findChildren(QLabel))
+        self.assertIn('历史快照', labels)
+        self.assertIn('便签正文', labels)
+        self.assertIn('明文', labels)
+        password_dialog = SetPasswordDialog()
+        try:
+            hint = '\n'.join(label.text() for label in password_dialog.findChildren(QLabel))
+            self.assertIn('明文', hint)
+            self.assertNotIn('内容将被加密', hint)
+        finally:
+            password_dialog.close()
 
     def test_tabs_have_clear_vector_icons_and_accessible_names(self):
         self.assertEqual(self.dialog.tab_widget.accessibleName(), '设置分类')

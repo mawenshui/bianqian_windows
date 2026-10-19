@@ -289,7 +289,11 @@ class BackupDialog(QDialog):
         """
         创建新备份
         """
-        self.backup_manager.flush_open_notes()
+        try:
+            self.backup_manager.flush_open_notes()
+        except Exception as exc:
+            QMessageBox.warning(self, '备份未开始', f'便签保存失败，未创建备份：{exc}')
+            return
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.create_backup_btn.setEnabled(False)
@@ -393,7 +397,11 @@ class BackupDialog(QDialog):
         
         item = selected_items[0]
         backup_path = item.data(Qt.UserRole)
-        self.backup_manager.flush_open_notes()
+        try:
+            self.backup_manager.flush_open_notes()
+        except Exception as exc:
+            QMessageBox.warning(self, '恢复未开始', f'便签保存失败，未恢复备份：{exc}')
+            return
         preview = self.backup_manager.preview_backup(backup_path)
         if not preview['valid']:
             QMessageBox.warning(self, '备份不可恢复', '; '.join(preview['errors']))
@@ -413,7 +421,11 @@ class BackupDialog(QDialog):
         )
         
         if reply == QMessageBox.Yes:
-            self.backup_manager.flush_open_notes()
+            try:
+                self.backup_manager.flush_open_notes()
+            except Exception as exc:
+                QMessageBox.warning(self, '恢复未开始', f'便签保存失败，未恢复备份：{exc}')
+                return
             for note in self.backup_manager.manager.notes.values():
                 note.setEnabled(False)
             self.progress_bar.setVisible(True)
@@ -575,16 +587,14 @@ class BackupManager:
         return self.create_backup_internal(backup_name)
 
     def flush_open_notes(self):
-        """在主线程保存待写便签，避免备份遗漏尚未落盘的内容。"""
+        """同步保存所有打开便签，失败时禁止生成可能过时的备份。"""
         for note in list(getattr(self.manager, 'notes', {}).values()):
             worker = getattr(note, '_save_worker', None)
             running = worker is not None and worker.isRunning()
-            timer = getattr(note, '_save_timer', None)
-            pending = timer is not None and timer.isActive()
             if running:
                 worker.wait()
-            if pending or not os.path.isfile(getattr(note, 'note_file', '')):
-                note.save_note_sync()
+            if note.save_note_sync() is False:
+                raise OSError(f'便签保存失败，备份已停止：{note.note_file}')
     
     def create_backup_internal(self, backup_name=None, progress_callback=None):
         """写入带 SHA256 清单的备份；失败时不留下半成品。"""
@@ -623,6 +633,14 @@ class BackupManager:
                             path = os.path.join(root, name)
                             if re.fullmatch(r'[0-9a-f]{32}_[^/\\]+', name) and os.path.isfile(path):
                                 files[f'{folder}/attachments/{note_folder}/{name}'] = path
+            if folder == 'notes':
+                conflicts = os.path.join(source, 'conflicts')
+                if os.path.isdir(conflicts) and not os.path.islink(conflicts):
+                    for name in os.listdir(conflicts):
+                        path = os.path.join(conflicts, name)
+                        if (re.fullmatch(r'note_[1-9]\d*\.conflict_remote_\d{8}_\d{6}_\d{6}\.json', name)
+                                and os.path.isfile(path) and not os.path.islink(path)):
+                            files[f'notes/conflicts/{name}'] = path
         if os.path.isfile(self.manager.settings_file):
             files['settings.json'] = self.manager.settings_file
         history_dir = os.path.join(get_user_data_dir(), 'history')
@@ -688,14 +706,22 @@ class BackupManager:
                 if total_size > 512 * 1024 * 1024:
                     result['errors'].append('解压后数据超过 512 MB')
                 for name in names:
+                    leaf = name.rsplit('/', 1)[-1]
+                    if (not leaf or leaf.endswith((' ', '.'))
+                            or any(ord(char) < 32 or char in '<>:"|?*' for char in leaf)):
+                        result['errors'].append(f'不安全或未知的文件路径: {name}')
+                        continue
                     allowed = (
                         re.fullmatch(r'notes/note_\d+\.json', name)
                         or re.fullmatch(r'trash/note_\d+_[0-9a-f]{32}\.json', name)
                         or (re.fullmatch(r'(?:notes|trash)/images/[A-Za-z0-9_.-]+', name)
                             and name.rsplit('/', 1)[-1] not in ('.', '..'))
                         or re.fullmatch(r'notes/attachments/note_\d+/[0-9a-f]{32}_[^/\\]+', name)
+                        or re.fullmatch(r'notes/conflicts/note_[1-9]\d*\.conflict_remote_\d{8}_\d{6}_\d{6}\.json', name)
                         or re.fullmatch(r'trash/attachments/note_\d+_[0-9a-f]{32}/[0-9a-f]{32}_[^/\\]+', name)
-                        or re.fullmatch(r'styles/[^/\\]+\.css', name)
+                        or (re.fullmatch(r'styles/[^/\\]+\.css', name)
+                            and not any(ord(char) < 32 or char in '<>:"|?*'
+                                        for char in name.rsplit('/', 1)[-1]))
                         or name == 'history/key.json'
                         or re.fullmatch(r'history/[0-9a-f]{32}/\d{8}T\d{6}_\d{6}_[0-9a-f]{12}\.snap', name)
                         or name in ('settings.json', 'manifest.json')
@@ -729,6 +755,9 @@ class BackupManager:
                     return result
                 if 'manifest.json' in names:
                     manifest = json.loads(archive.read('manifest.json'))
+                    if not isinstance(manifest, dict):
+                        result['errors'].append('SHA256 清单格式无效')
+                        return result
                     expected = manifest.get('files', {})
                     if not isinstance(expected, dict) or set(expected) != set(names) - {'manifest.json'}:
                         result['errors'].append('SHA256 清单与文件列表不一致')
@@ -953,14 +982,22 @@ class BackupManager:
             return
         
         # 检测数据是否有变化
-        self.flush_open_notes()
+        try:
+            self.flush_open_notes()
+        except Exception as exc:
+            logger.warning('自动备份跳过：便签保存失败：%s', exc)
+            return
         current_hash = self._get_notes_state_hash()
         if current_hash and current_hash == self._last_backup_hash:
             logger.info('本次检查无修改，跳过本次备份')
             return
         
         # 创建新备份
-        backup_path = self.create_backup()
+        try:
+            backup_path = self.create_backup()
+        except Exception as exc:
+            logger.warning('自动备份失败：%s', exc)
+            return
         if backup_path:
             self._last_backup_hash = current_hash
             self.cleanup_old_backups()

@@ -24,10 +24,11 @@ class LocalSyncClient:
     def list_files(self) -> List[str]:
         """列出同步目录中的便签文件"""
         files = []
-        if os.path.exists(self.sync_dir):
-            for filename in os.listdir(self.sync_dir):
-                if filename.startswith('note_') and filename.endswith('.json'):
-                    files.append(filename)
+        if not os.path.isdir(self.sync_dir):
+            raise FileNotFoundError(f'同步目录不可用: {self.sync_dir}')
+        for filename in os.listdir(self.sync_dir):
+            if filename.startswith('note_') and filename.endswith('.json'):
+                files.append(filename)
         return files
 
     def copy_to_sync(self, local_path: str, filename: str) -> bool:
@@ -86,7 +87,7 @@ class LocalSyncClient:
             return h.hexdigest()
         except Exception as e:
             logger.error(f'计算哈希失败: {e}')
-            return ''
+            raise OSError(f'同步文件读取失败: {filename}') from e
 
     def get_file_hashes(self) -> Dict[str, str]:
         """获取同步目录中所有文件的哈希"""
