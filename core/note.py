@@ -1905,6 +1905,16 @@ class StickyNote(QWidget):
                 self._background_scaled_cache = QPixmap()
             self._update_window_shape()
 
+    def event(self, event):
+        result = super().event(event)
+        # The note and its detached edge handle are both top-level windows.
+        # Activating the note (including by clicking an editor child) can put
+        # it above the handle; restore the handle after native activation ends.
+        if event.type() in (QEvent.WindowActivate, QEvent.ZOrderChange):
+            if getattr(self, '_hover_restored', False):
+                QTimer.singleShot(0, self._raise_preview_handle)
+        return result
+
     def _background_candidates(self):
         """Return the stored background path and whether it is app-managed."""
         stored = str(getattr(self, 'background_image', '') or '').strip()
@@ -2545,6 +2555,10 @@ class StickyNote(QWidget):
 
     def apply_adaptive_control_styles(self, styles):
         background_active = self._has_background_image()
+        if hasattr(self, 'checklist_widget'):
+            self.checklist_widget.apply_theme(
+                styles, background_active, os.path.join(get_styles_dir(), 'icons')
+            )
         chrome_text = styles['panel_text'] if background_active else styles['separator_color']
         # 分隔符标签样式
         for sep in ['separator1', 'separator2', 'separator3', 'separator4',
@@ -3769,7 +3783,9 @@ class StickyNote(QWidget):
         if widget in [self.title_edit, self.text_edit]:
             super().mouseReleaseEvent(event)
             return
-        was_dragging = self.dragging
+        # A press on empty chrome starts drag tracking, but a plain click has
+        # not moved the note and must not retrigger edge auto-hide in preview.
+        was_dragging = self.dragging and self.pos() != self.initial_geometry.topLeft()
         self.dragging = False
         self.resizing = False
         self.resize_dir = None
@@ -4370,6 +4386,14 @@ class StickyNote(QWidget):
         else:
             self._pre_hide_geometry = None
             self.activateWindow()
+
+    def _raise_preview_handle(self):
+        """Keep the separate arrow window above an activated preview note."""
+        tab = getattr(self, 'hide_tab', None)
+        if (getattr(self, '_hover_restored', False)
+                and getattr(self, 'hover_preview_enabled', False)
+                and tab is not None and tab.isVisible()):
+            tab.raise_()
 
     def _is_hide_tab_arrow_pos(self, pos):
         """给箭头四周留少量点击余量，且不占用标题区。"""

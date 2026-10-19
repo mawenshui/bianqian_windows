@@ -529,6 +529,66 @@ class TestHideTabPositioning(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_preview_arrow_is_raised_after_note_activation(self):
+        """点击预览便签内的控件后，独立箭头仍须位于便签上方。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note.auto_hidden = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            note._create_hide_tab()
+            note._restore_from_auto_hide(hover_triggered=True)
+            note._slide_anim.stop()
+            tab = note.hide_tab
+            with patch.object(tab, 'raise_') as raise_tab:
+                note.event(QEvent(QEvent.WindowActivate))
+                QApplication.processEvents()
+                raise_tab.assert_called()
+
+                raise_tab.reset_mock()
+                note.event(QEvent(QEvent.ZOrderChange))
+                QApplication.processEvents()
+                raise_tab.assert_called()
+
+                raise_tab.reset_mock()
+                note._hover_restored = False
+                note.event(QEvent(QEvent.WindowActivate))
+                QApplication.processEvents()
+                raise_tab.assert_not_called()
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_clicking_preview_chrome_without_drag_does_not_recollapse(self):
+        """预览便签的空白处单击不能误判为拖拽并重新贴边。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            note = self._create_note(temp_dir)
+            note._hover_restored = True
+            note.hidden_edge = 'left'
+            note._pre_hide_geometry = note.geometry()
+            point = QPoint(200, 150)
+            press = QMouseEvent(QEvent.MouseButtonPress, point, Qt.LeftButton,
+                                Qt.LeftButton, Qt.NoModifier)
+            release = QMouseEvent(QEvent.MouseButtonRelease, point, Qt.LeftButton,
+                                  Qt.NoButton, Qt.NoModifier)
+            with patch.object(note, 'childAt', return_value=None), \
+                    patch.object(note, '_check_auto_hide') as check_hide:
+                note.mousePressEvent(press)
+                note.mouseReleaseEvent(release)
+                check_hide.assert_not_called()
+                note.mousePressEvent(press)
+                note.move(note.pos() + QPoint(10, 0))
+                note.mouseReleaseEvent(release)
+                check_hide.assert_called_once()
+            self.assertTrue(note._hover_restored)
+            note.is_deleted = True
+            note.close()
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_legacy_setting_restores_whole_tab_hover_and_click(self):
         temp_dir = tempfile.mkdtemp()
         try:

@@ -8,6 +8,7 @@ import re
 import uuid
 
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QVBoxLayout, QWidget, QDialog, QCheckBox, QLabel, QMessageBox,
@@ -66,6 +67,82 @@ class ChecklistWidget(QWidget):
         transfer.addWidget(paste_button)
         layout.addLayout(transfer)
         self.refresh()
+
+    def apply_theme(self, styles, background_active=False, icon_dir=None):
+        """Keep the list, editor and actions on the note's current palette."""
+        list_bg = styles['editor_alpha'] if background_active else styles['editor_bg']
+        button_bg = styles['control_alpha'] if background_active else styles['control_surface']
+        button_hover = (styles['control_hover_alpha'] if background_active
+                        else styles['control_hover'])
+        self.list_widget.setStyleSheet(f'''
+            QListWidget {{
+                background-color: {list_bg}; color: {styles['text']};
+                border: 1px solid {styles['input_border']};
+                border-radius: {styles['radius_field']}px;
+                padding: 3px;
+                selection-background-color: {styles['selection']};
+                selection-color: {styles['selection_text']};
+            }}
+            QListWidget::item {{ padding: 3px 5px; min-height: 20px; }}
+            QListWidget::item:hover {{
+                background-color: {styles['control_hover']};
+                color: {styles['control_text']};
+            }}
+            QListWidget::item:selected {{
+                background-color: {styles['selection']};
+                color: {styles['selection_text']};
+            }}
+            QListWidget:focus {{ border: 2px solid {styles['focus']}; }}
+            QListWidget::indicator {{
+                width: 15px; height: 15px; border-radius: 3px;
+                border: 1px solid {styles['border']};
+                background-color: {styles['surface']};
+            }}
+            QListWidget::indicator:checked {{
+                background-color: {styles['accent']};
+                border-color: {styles['focus']};
+                {self._check_icon_rule(styles, icon_dir)}
+            }}
+        ''')
+        self.input.setStyleSheet(f'''
+            QLineEdit {{
+                background-color: {list_bg}; color: {styles['text']};
+                border: 1px solid {styles['input_border']};
+                border-radius: {styles['radius_field']}px;
+                padding: 0 8px; min-height: 28px;
+                font-size: 9pt; font-weight: normal;
+                selection-background-color: {styles['selection']};
+                selection-color: {styles['selection_text']};
+            }}
+            QLineEdit:focus {{ border: 2px solid {styles['focus']}; }}
+        ''')
+        button_style = f'''
+            QPushButton {{
+                background-color: {button_bg}; color: {styles['control_text']};
+                border: 1px solid {styles['border']}; border-radius: 5px;
+                padding: 0 4px; min-height: 28px;
+                font-size: 9pt; font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {button_hover}; border-color: {styles['focus']};
+            }}
+            QPushButton:focus {{ border: 2px solid {styles['focus']}; }}
+            QPushButton:disabled {{
+                color: {styles['muted']}; background-color: transparent;
+                border-color: {styles['border']};
+            }}
+        '''
+        for button in self.findChildren(QPushButton):
+            button.setStyleSheet(button_style)
+
+    @staticmethod
+    def _check_icon_rule(styles, icon_dir):
+        if not icon_dir:
+            return ''
+        icon = ('check-light.svg' if QColor(styles['accent_text']).lightness() > 128
+                else 'check-dark.svg')
+        path = os.path.join(icon_dir, icon).replace('\\', '/')
+        return f'image: url("{path}");' if os.path.isfile(path) else ''
 
     def _remember(self):
         self._undo.append(copy.deepcopy(self._items))
